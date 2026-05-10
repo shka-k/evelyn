@@ -28,8 +28,6 @@ use init::{
 use post::PostProcessor;
 use quad::{QuadPipeline, Rect};
 
-const PREEDIT_COLOR: Rgb = Rgb(0xff, 0xe0, 0x70);
-const PREEDIT_UNDERLINE: Rgb = Rgb(0xff, 0xe0, 0x70);
 const PREEDIT_UNDERLINE_PT: f32 = 2.0;
 
 pub struct Renderer {
@@ -242,7 +240,7 @@ impl Renderer {
                 top: pre_top,
                 scale: 1.0,
                 bounds,
-                default_color: rgb_to_color(PREEDIT_COLOR),
+                default_color: rgb_to_color(cursor_color()),
                 custom_glyphs: &[],
             });
         }
@@ -387,7 +385,7 @@ impl Renderer {
                 y: pre_top + self.line_height - underline_h,
                 w,
                 h: underline_h,
-                color: rgb_to_rgba(PREEDIT_UNDERLINE, 1.0),
+                color: rgb_to_rgba(cursor_color(), 1.0),
             }];
         }
         if !show_cursor {

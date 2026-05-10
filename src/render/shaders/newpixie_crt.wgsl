@@ -70,6 +70,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let v = clamp(1.0 - dot(centered * 1.4, centered * 1.4), 0.55, 1.0);
     color *= v;
 
+    // Ambient phosphor glow — additive so the scanline + RGB-mask pattern
+    // remains visible on near-black cells. Kept achromatic so dark areas
+    // don't pick up an unintended color cast; the per-column RGB mask still
+    // produces the subtle striping.
+    let ambient = 0.012;
+    color += vec3<f32>(ambient) * mask * scan * v;
+
     // The offscreen texture is sRGB so `textureSample` returned linear values
     // and wgpu will gamma-encode our output back to sRGB on write — keep the
     // result in linear space here, no extra gamma correction.
