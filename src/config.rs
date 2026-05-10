@@ -23,8 +23,7 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct FontConfig {
     /// Font family name (matches a Typographic Family or Family Name entry
-    /// in any installed font). `None` falls back to the system default
-    /// monospace.
+    /// in any installed font). `None` falls back to the bundled font.
     pub family: Option<String>,
 
     /// Font size in logical points. Multiplied by the window scale factor at
@@ -33,6 +32,11 @@ pub struct FontConfig {
 
     /// Line height as a multiple of the font size.
     pub line_height_factor: f32,
+
+    /// Whether to enable OpenType programming ligatures (`liga`, `clig`,
+    /// `calt`, `dlig`). Set to `false` for fonts where you want to see the
+    /// raw characters (e.g. `==`, `->`, `>=`) without composition.
+    pub ligatures: bool,
 }
 
 impl Default for FontConfig {
@@ -41,6 +45,7 @@ impl Default for FontConfig {
             family: None,
             size_pt: 14.0,
             line_height_factor: 1.3,
+            ligatures: true,
         }
     }
 }

@@ -14,6 +14,16 @@ use crate::config::CONFIG;
 
 use super::font_attrs;
 
+/// Primary monospace font (Latin + Nerd Font icons). Bundled so the terminal
+/// looks the same out-of-the-box on any host. CJK glyphs come from the host's
+/// system fonts via cosmic-text's per-script fallback.
+const FONT_PRIMARY_REGULAR: &[u8] =
+    include_bytes!("../../assets/fonts/GeistMonoNerdFontMono-Regular.otf");
+const FONT_PRIMARY_BOLD: &[u8] =
+    include_bytes!("../../assets/fonts/GeistMonoNerdFontMono-Bold.otf");
+
+pub const BUNDLED_FONT_NAME: &str = "GeistMono NFM";
+
 pub(super) struct GpuInit {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -67,7 +77,10 @@ pub(super) fn init_text_stack(
     queue: &wgpu::Queue,
     format: wgpu::TextureFormat,
 ) -> TextInit {
-    let font_system = FontSystem::new();
+    let mut font_system = FontSystem::new();
+    let db = font_system.db_mut();
+    db.load_font_data(FONT_PRIMARY_REGULAR.to_vec());
+    db.load_font_data(FONT_PRIMARY_BOLD.to_vec());
     let swash_cache = SwashCache::new();
     let cache = Cache::new(device);
     let viewport = Viewport::new(device, &cache);

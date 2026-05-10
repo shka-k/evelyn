@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use glyphon::{
+    cosmic_text::{FeatureTag, FontFeatures},
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
-    TextAtlas, TextBounds, TextRenderer, Viewport,
+    TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
 use wgpu::{
     CommandEncoderDescriptor, CurrentSurfaceTexture, LoadOp, Operations,
@@ -19,13 +20,16 @@ use crate::color::{Rgb, DEFAULT_BG, DEFAULT_FG};
 use crate::config::CONFIG;
 use crate::term::Term;
 
-use init::{init_gpu, init_text_stack, make_buffer, measure_cell_width, metrics_for, GpuInit, TextInit};
+use init::{
+    init_gpu, init_text_stack, make_buffer, measure_cell_width, metrics_for, GpuInit, TextInit,
+    BUNDLED_FONT_NAME,
+};
 use quad::{QuadPipeline, Rect};
 
 const CURSOR_COLOR_RGBA: [f32; 4] = [0.90, 0.78, 0.20, 1.0];
-const CURSOR_STROKE_PT: f32 = 2.0;
 const PREEDIT_COLOR: Rgb = Rgb(0xff, 0xe0, 0x70);
 const PREEDIT_UNDERLINE_RGBA: [f32; 4] = [1.0, 0.88, 0.44, 1.0];
+const PREEDIT_UNDERLINE_PT: f32 = 2.0;
 
 pub struct Renderer {
     pub window: Arc<Window>,
@@ -38,13 +42,24 @@ pub struct Renderer {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
-    buffer: Buffer,
+    /// One Buffer per text run. Each run is a maximal stretch of cells that
+    /// can be shaped together (uniform attrs, no wide char in the middle) and
+    /// is positioned at an exact grid column. Pool grows as needed.
+    row_buffers: Vec<Buffer>,
     preedit_buffer: Buffer,
     quads: QuadPipeline,
     scale: f32,
     pub font_size: f32,
     pub line_height: f32,
     pub cell_width: f32,
+}
+
+#[derive(Debug)]
+struct Run {
+    col: u16,
+    row: u16,
+    text: String,
+    attrs: Attrs<'static>,
 }
 
 impl Renderer {
@@ -63,12 +78,7 @@ impl Renderer {
         let scale = window.scale_factor() as f32;
         let (font_size, line_height) = metrics_for(scale);
 
-        let mut buffer = make_buffer(&mut font_system, font_size, line_height);
-        buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(size.height as f32),
-        );
+        let row_buffers: Vec<Buffer> = Vec::new();
         let mut preedit_buffer = make_buffer(&mut font_system, font_size, line_height);
         preedit_buffer.set_size(
             &mut font_system,
@@ -97,7 +107,7 @@ impl Renderer {
             viewport,
             atlas,
             text_renderer,
-            buffer,
+            row_buffers,
             preedit_buffer,
             quads,
             scale,
@@ -116,7 +126,9 @@ impl Renderer {
         self.font_size = font_size;
         self.line_height = line_height;
         let m = Metrics::new(font_size, line_height);
-        self.buffer.set_metrics(&mut self.font_system, m);
+        for buf in &mut self.row_buffers {
+            buf.set_metrics(&mut self.font_system, m);
+        }
         self.preedit_buffer.set_metrics(&mut self.font_system, m);
         self.cell_width = measure_cell_width(&mut self.font_system, font_size, line_height);
     }
@@ -125,11 +137,6 @@ impl Renderer {
         self.config.width = w.max(1);
         self.config.height = h.max(1);
         self.surface.configure(&self.device, &self.config);
-        self.buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
     }
 
     pub fn grid_size(&self) -> (u16, u16) {
@@ -139,7 +146,37 @@ impl Renderer {
     }
 
     pub fn render(&mut self, term: &Term, preedit: &str) -> Result<()> {
-        let (has_preedit, preedit_w) = self.shape(term, preedit);
+        let show_cursor = preedit.is_empty();
+        let cursor_wide = if show_cursor {
+            cursor_cell(term).map(|(_, w)| w).unwrap_or(false)
+        } else {
+            false
+        };
+
+        // Build grid runs and shape each into a dedicated row buffer. This
+        // keeps every run pinned to its grid column so font fallback widths
+        // can't drift the layout. The cursor cell becomes its own run with
+        // an inverted foreground color, painted on top of the solid block.
+        let base = font_attrs();
+        let cursor_override = if show_cursor {
+            Some((
+                term.cur_x,
+                term.cur_y,
+                base.clone().color(rgb_to_color(DEFAULT_BG)),
+            ))
+        } else {
+            None
+        };
+        let runs = build_runs(term, base.clone(), cursor_override);
+        self.shape_runs(&runs);
+
+        // Preedit
+        let has_preedit = !preedit.is_empty();
+        let preedit_w = if has_preedit {
+            self.shape_preedit(preedit, base.clone())
+        } else {
+            0.0
+        };
 
         self.viewport.update(
             &self.queue,
@@ -158,16 +195,22 @@ impl Renderer {
             right: self.config.width as i32,
             bottom: self.config.height as i32,
         };
-        let mut areas: Vec<TextArea> = Vec::with_capacity(2);
-        areas.push(TextArea {
-            buffer: &self.buffer,
-            left: 0.0,
-            top: 0.0,
-            scale: 1.0,
-            bounds,
-            default_color: rgb_to_color(DEFAULT_FG),
-            custom_glyphs: &[],
-        });
+        // Row TextAreas: one per run, positioned at exact grid column.
+        let cell_width = self.cell_width;
+        let line_height = self.line_height;
+        let mut areas: Vec<TextArea> = runs
+            .iter()
+            .enumerate()
+            .map(|(i, run)| TextArea {
+                buffer: &self.row_buffers[i],
+                left: run.col as f32 * cell_width,
+                top: run.row as f32 * line_height,
+                scale: 1.0,
+                bounds,
+                default_color: rgb_to_color(DEFAULT_FG),
+                custom_glyphs: &[],
+            })
+            .collect();
         if has_preedit {
             areas.push(TextArea {
                 buffer: &self.preedit_buffer,
@@ -194,7 +237,7 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&TextureViewDescriptor::default());
-        let overlay = self.overlay_quads(term, has_preedit, preedit_w, pre_left, pre_top);
+        let overlay = self.overlay_quads(term, has_preedit, preedit_w, cursor_wide, pre_left, pre_top);
 
         let mut encoder = self
             .device
@@ -216,8 +259,9 @@ impl Renderer {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)?;
+            // Solid cursor block first, then text on top — the cursor cell's
+            // char run uses DEFAULT_BG as its foreground so it appears
+            // inverted against the amber block.
             self.quads.draw(
                 &self.device,
                 &self.queue,
@@ -226,6 +270,8 @@ impl Renderer {
                 self.config.height as f32,
                 &overlay,
             );
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)?;
         }
         self.queue.submit(Some(encoder.finish()));
         self.window.pre_present_notify();
@@ -234,66 +280,88 @@ impl Renderer {
         Ok(())
     }
 
-    /// Push grid + preedit text into the buffers and shape them. Returns
-    /// `(has_preedit, preedit_pixel_width)`.
-    fn shape(&mut self, term: &Term, preedit: &str) -> (bool, f32) {
-        let attrs = font_attrs();
-        let text = build_grid_text(term);
-        self.buffer
-            .set_text(&mut self.font_system, &text, &attrs, Shaping::Advanced, None);
-        self.buffer
-            .shape_until_scroll(&mut self.font_system, false);
-
-        let has_preedit = !preedit.is_empty();
-        let mut preedit_w: f32 = 0.0;
-        if has_preedit {
-            self.preedit_buffer.set_text(
+    /// Grow the row buffer pool to fit `count` runs and shape each one. The
+    /// pool is reused across frames; we re-set_text on every render so old
+    /// content beyond `runs.len()` is harmless (just not referenced).
+    fn shape_runs(&mut self, runs: &[Run]) {
+        let needed = runs.len();
+        while self.row_buffers.len() < needed {
+            let mut buf = make_buffer(&mut self.font_system, self.font_size, self.line_height);
+            // Wide enough for any single run on a single line.
+            buf.set_size(
                 &mut self.font_system,
-                preedit,
-                &attrs,
+                Some(self.config.width as f32),
+                Some(self.line_height * 2.0),
+            );
+            self.row_buffers.push(buf);
+        }
+        for (i, run) in runs.iter().enumerate() {
+            let buf = &mut self.row_buffers[i];
+            buf.set_text(
+                &mut self.font_system,
+                &run.text,
+                &run.attrs,
                 Shaping::Advanced,
                 None,
             );
-            self.preedit_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-            for run in self.preedit_buffer.layout_runs() {
-                for g in run.glyphs.iter() {
-                    preedit_w = preedit_w.max(g.x + g.w);
-                }
-            }
+            buf.shape_until_scroll(&mut self.font_system, false);
         }
-        (has_preedit, preedit_w)
     }
 
-    /// Cursor outline, or — when IME is composing — the preedit underline.
+    fn shape_preedit(&mut self, preedit: &str, base: Attrs<'_>) -> f32 {
+        self.preedit_buffer
+            .set_monospace_width(&mut self.font_system, Some(self.cell_width));
+        self.preedit_buffer.set_text(
+            &mut self.font_system,
+            preedit,
+            &base,
+            Shaping::Advanced,
+            None,
+        );
+        self.preedit_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+        let mut max_x: f32 = 0.0;
+        for run in self.preedit_buffer.layout_runs() {
+            for g in run.glyphs.iter() {
+                max_x = max_x.max(g.x + g.w);
+            }
+        }
+        max_x
+    }
+
+    /// Solid cursor block, or — when IME is composing — the preedit underline.
     fn overlay_quads(
         &self,
         term: &Term,
         has_preedit: bool,
         preedit_w: f32,
+        cursor_wide: bool,
         pre_left: f32,
         pre_top: f32,
     ) -> Vec<Rect> {
-        let stroke = (CURSOR_STROKE_PT * self.scale).round().max(1.0);
         if has_preedit {
+            let underline_h = (PREEDIT_UNDERLINE_PT * self.scale).round().max(1.0);
             let w = preedit_w.max(self.cell_width);
-            vec![Rect {
+            return vec![Rect {
                 x: pre_left,
-                y: pre_top + self.line_height - stroke,
+                y: pre_top + self.line_height - underline_h,
                 w,
-                h: stroke,
+                h: underline_h,
                 color: PREEDIT_UNDERLINE_RGBA,
-            }]
-        } else {
-            build_cursor_outline(
-                term.cur_x as f32 * self.cell_width,
-                term.cur_y as f32 * self.line_height,
-                self.cell_width,
-                self.line_height,
-                stroke,
-            )
-            .to_vec()
+            }];
         }
+        let block_w = if cursor_wide {
+            self.cell_width * 2.0
+        } else {
+            self.cell_width
+        };
+        vec![Rect {
+            x: term.cur_x as f32 * self.cell_width,
+            y: term.cur_y as f32 * self.line_height,
+            w: block_w,
+            h: self.line_height,
+            color: CURSOR_COLOR_RGBA,
+        }]
     }
 
     /// Acquire the next surface texture, recovering transient surface losses.
@@ -312,29 +380,116 @@ impl Renderer {
     }
 }
 
-fn build_grid_text(term: &Term) -> String {
-    let mut text = String::with_capacity(term.cells.len() + term.rows as usize);
+/// Walk the grid and emit one `Run` per maximal stretch of cells that can be
+/// shaped together: same attrs, no wide character interrupting. Each wide
+/// character becomes its own single-cell run so the next run can start at an
+/// exact grid column without depending on the wide glyph's natural advance.
+/// `cursor_override` forces the matching cell into its own run with the given
+/// attrs, used for the inverted cursor character.
+fn build_runs(
+    term: &Term,
+    base: Attrs<'static>,
+    cursor_override: Option<(u16, u16, Attrs<'static>)>,
+) -> Vec<Run> {
+    let mut runs = Vec::new();
+
     for y in 0..term.rows {
+        let mut run_col: u16 = 0;
+        let mut run_attrs = attrs_for_cell(base.clone(), DEFAULT_FG, false);
+        let mut run_text = String::new();
+
         for x in 0..term.cols {
             let i = (y as usize) * (term.cols as usize) + (x as usize);
-            let ch = term.cells[i].ch;
-            text.push(if ch == '\0' { ' ' } else { ch });
+            let cell = &term.cells[i];
+            if cell.ch == '\0' {
+                continue; // wide-char continuation
+            }
+            let is_cursor = cursor_override
+                .as_ref()
+                .map(|(cx, cy, _)| *cx == x && *cy == y)
+                .unwrap_or(false);
+            let cell_attrs = if is_cursor {
+                cursor_override.as_ref().unwrap().2.clone()
+            } else {
+                attrs_for_cell(base.clone(), cell.fg, cell.bold)
+            };
+            // Cursor or wide cells always get their own single-cell run.
+            let solo = is_cursor || cell.wide;
+
+            if solo {
+                if !run_text.is_empty() {
+                    runs.push(Run {
+                        col: run_col,
+                        row: y,
+                        text: std::mem::take(&mut run_text),
+                        attrs: run_attrs.clone(),
+                    });
+                }
+                runs.push(Run {
+                    col: x,
+                    row: y,
+                    text: cell.ch.to_string(),
+                    attrs: cell_attrs,
+                });
+                continue;
+            }
+
+            // Narrow non-cursor cell — extend or restart the current run.
+            if run_text.is_empty() {
+                run_col = x;
+                run_attrs = cell_attrs;
+                run_text.push(cell.ch);
+            } else if attrs_eq(&run_attrs, &cell_attrs) {
+                run_text.push(cell.ch);
+            } else {
+                runs.push(Run {
+                    col: run_col,
+                    row: y,
+                    text: std::mem::take(&mut run_text),
+                    attrs: run_attrs.clone(),
+                });
+                run_col = x;
+                run_attrs = cell_attrs;
+                run_text.push(cell.ch);
+            }
         }
-        if y + 1 < term.rows {
-            text.push('\n');
+        if !run_text.is_empty() {
+            runs.push(Run {
+                col: run_col,
+                row: y,
+                text: run_text,
+                attrs: run_attrs,
+            });
         }
     }
-    text
+    runs
 }
 
-fn build_cursor_outline(x: f32, y: f32, w: f32, h: f32, t: f32) -> [Rect; 4] {
-    let c = CURSOR_COLOR_RGBA;
-    [
-        Rect { x, y, w, h: t, color: c },
-        Rect { x, y: y + h - t, w, h: t, color: c },
-        Rect { x, y, w: t, h, color: c },
-        Rect { x: x + w - t, y, w: t, h, color: c },
-    ]
+fn cursor_cell(term: &Term) -> Option<(char, bool)> {
+    if term.cur_x >= term.cols || term.cur_y >= term.rows {
+        return None;
+    }
+    let i = (term.cur_y as usize) * (term.cols as usize) + (term.cur_x as usize);
+    let cell = term.cells.get(i)?;
+    if cell.ch == '\0' {
+        return None; // landed on a wide-char continuation, suppress
+    }
+    let ch = if cell.ch.is_whitespace() { ' ' } else { cell.ch };
+    Some((ch, cell.wide))
+}
+
+
+fn attrs_for_cell<'a>(base: Attrs<'a>, fg: Rgb, bold: bool) -> Attrs<'a> {
+    let mut a = base.color(rgb_to_color(fg));
+    if bold {
+        a = a.weight(Weight::BOLD);
+    }
+    a
+}
+
+/// Field-wise equality on the bits we actually vary (color + weight).
+fn attrs_eq(a: &Attrs<'_>, b: &Attrs<'_>) -> bool {
+    a.color_opt == b.color_opt && a.weight == b.weight
 }
 
 fn clear_color_for(bg: Rgb) -> wgpu::Color {
@@ -351,10 +506,21 @@ fn rgb_to_color(c: Rgb) -> Color {
 }
 
 fn font_attrs() -> Attrs<'static> {
-    match CONFIG.font.family.as_deref() {
-        Some(name) => Attrs::new().family(Family::Name(name)),
-        None => Attrs::new().family(Family::Monospace),
+    let name = CONFIG.font.family.as_deref().unwrap_or(BUNDLED_FONT_NAME);
+    let mut a = Attrs::new().family(Family::Name(name));
+    if !CONFIG.font.ligatures {
+        a = a.font_features(ligatures_off());
     }
+    a
+}
+
+fn ligatures_off() -> FontFeatures {
+    let mut f = FontFeatures::new();
+    f.disable(FeatureTag::STANDARD_LIGATURES);
+    f.disable(FeatureTag::CONTEXTUAL_LIGATURES);
+    f.disable(FeatureTag::CONTEXTUAL_ALTERNATES);
+    f.disable(FeatureTag::DISCRETIONARY_LIGATURES);
+    f
 }
 
 fn srgb_to_linear(c: u8) -> f64 {

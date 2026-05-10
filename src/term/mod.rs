@@ -1,13 +1,18 @@
 mod parser;
 
 use crate::color::{Rgb, DEFAULT_BG, DEFAULT_FG};
+use crate::width::is_wide;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Cell {
+    /// `'\0'` marks the right half of a wide character (continuation).
     pub ch: char,
     pub fg: Rgb,
     pub bg: Rgb,
     pub bold: bool,
+    /// Set on the LEFT half of a wide character. Its right neighbour is a
+    /// continuation cell with `ch == '\0'`.
+    pub wide: bool,
 }
 
 impl Default for Cell {
@@ -17,6 +22,7 @@ impl Default for Cell {
             fg: DEFAULT_FG,
             bg: DEFAULT_BG,
             bold: false,
+            wide: false,
         }
     }
 }
@@ -72,7 +78,9 @@ impl Term {
     }
 
     fn put_char(&mut self, c: char) {
-        if self.cur_x >= self.cols {
+        let wide = is_wide(c);
+        let needed = if wide { 2 } else { 1 };
+        if self.cur_x + needed > self.cols {
             self.cur_x = 0;
             self.line_feed();
         }
@@ -82,8 +90,20 @@ impl Term {
             fg: self.fg,
             bg: self.bg,
             bold: self.bold,
+            wide,
         };
-        self.cur_x += 1;
+        if wide && self.cur_x + 1 < self.cols {
+            // Mark the right half so the renderer knows to skip it.
+            let j = self.idx(self.cur_x + 1, self.cur_y);
+            self.cells[j] = Cell {
+                ch: '\0',
+                fg: self.fg,
+                bg: self.bg,
+                bold: self.bold,
+                wide: false,
+            };
+        }
+        self.cur_x += needed;
         self.dirty = true;
     }
 
