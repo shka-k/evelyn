@@ -80,7 +80,7 @@ const VIG_GAIN:  f32 = 1.55;
 // stay dark even at the center. CENTER_LIFT adds a flat amount on top,
 // so the whole middle of the screen reads as gently emissive — closer
 // to the ambient phosphor glow of a real CRT.
-const CENTER_LIFT: f32 = 0.08;
+const CENTER_LIFT: f32 = 0.04;
 // Shape of the vignette mix. The slang shader uses sqrt (≈0.5) which
 // keeps the corners pretty lit; raising the exponent pulls the falloff
 // inward so the four-corner gradient toward theme_bg reads more clearly

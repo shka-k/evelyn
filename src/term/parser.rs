@@ -79,6 +79,7 @@ impl Perform for Term {
                     1002 => self.mouse_proto = if on { super::MouseProto::Button } else { super::MouseProto::Off },
                     1003 => self.mouse_proto = if on { super::MouseProto::Any } else { super::MouseProto::Off },
                     1006 => self.mouse_sgr = on,
+                    2004 => self.bracketed_paste = on,
                     1047 | 1049 => {
                         if on {
                             self.enter_alt_screen();

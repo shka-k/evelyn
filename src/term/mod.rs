@@ -94,6 +94,11 @@ pub struct Term {
     /// When off, the legacy X10 form `\\e[Mbxy` (one byte each, +32) is
     /// used and gets capped at column/row 223. Modern TUIs request 1006.
     pub mouse_sgr: bool,
+    /// DECSET 2004 — bracketed paste. When set, pasted text must be
+    /// wrapped in `\e[200~ … \e[201~` so the app can distinguish it
+    /// from typed input (shells/editors use this to disable autoindent,
+    /// suppress key bindings, etc. mid-paste).
+    pub bracketed_paste: bool,
     /// VT100 "last column" / deferred wrap. Set after a print lands in the
     /// rightmost column with DECAWM on; the wrap is held until the next
     /// print, and any cursor motion (CR/LF/BS/CUP/…) cancels it. Without
@@ -176,6 +181,7 @@ impl Term {
             app_cursor_keys: false,
             mouse_proto: MouseProto::Off,
             mouse_sgr: false,
+            bracketed_paste: false,
             pending_wrap: false,
             replies: Vec::new(),
             scroll_top: 0,
