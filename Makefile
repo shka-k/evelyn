@@ -27,27 +27,29 @@ ICNS       := $(BUILD_DIR)/$(NAME).icns
 PLIST      := $(CONTENTS)/Info.plist
 DMG        := $(BUILD_DIR)/$(NAME)-$(VERSION).dmg
 
-.PHONY: app icon install dmg clean
+.PHONY: app bin icon install dmg clean
 
-app: $(APP_DIR)/Contents/MacOS/$(BIN) $(ICNS) $(PLIST) | $(RES_DIR)
+app: bin $(ICNS) $(PLIST) | $(RES_DIR)
 	@cp $(ICNS) $(RES_DIR)/$(NAME).icns
 	@codesign --force --sign - --timestamp=none $(APP_DIR) >/dev/null 2>&1 || true
 	@echo "→ $(APP_DIR)"
 
-# Compile the binary, then place it inside the bundle. Two flows: a single
-# host-arch release, or a universal binary stitched together with lipo.
-$(APP_DIR)/Contents/MacOS/$(BIN): | $(MACOS_DIR)
+# Always shell out to cargo — it does its own incremental detection from
+# the source tree, which is more accurate than any prerequisite list we
+# could maintain here. Two flows: a single host-arch release, or a
+# universal binary stitched together with lipo.
+bin: | $(MACOS_DIR)
 ifeq ($(ARCH),both)
 	cargo build --release --target x86_64-apple-darwin
 	cargo build --release --target aarch64-apple-darwin
-	lipo -create -output $@ \
+	lipo -create -output $(APP_DIR)/Contents/MacOS/$(BIN) \
 		target/x86_64-apple-darwin/release/$(BIN) \
 		target/aarch64-apple-darwin/release/$(BIN)
 else
 	cargo build --release
-	cp target/release/$(BIN) $@
+	cp target/release/$(BIN) $(APP_DIR)/Contents/MacOS/$(BIN)
 endif
-	chmod +x $@
+	chmod +x $(APP_DIR)/Contents/MacOS/$(BIN)
 
 # .icns: build an iconset from the master PNG with sips, then iconutil it.
 icon: $(ICNS)
