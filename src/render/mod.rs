@@ -320,17 +320,16 @@ impl Renderer {
     fn shape_runs(&mut self, runs: &[Run]) {
         let needed = runs.len();
         while self.row_buffers.len() < needed {
-            let mut buf = make_buffer(&mut self.font_system, self.font_size, self.line_height);
-            // Wide enough for any single run on a single line.
-            buf.set_size(
-                &mut self.font_system,
-                Some(self.config.width as f32),
-                Some(self.line_height * 2.0),
-            );
+            let buf = make_buffer(&mut self.font_system, self.font_size, self.line_height);
             self.row_buffers.push(buf);
         }
         for (i, run) in runs.iter().enumerate() {
             let buf = &mut self.row_buffers[i];
+            // Unbounded width so a row run never wraps internally; a stale
+            // buffer width after a window resize would otherwise cause the
+            // overflow to render as a second line in the cell below — which
+            // looks exactly like "the frame got newlined."
+            buf.set_size(&mut self.font_system, None, Some(self.line_height));
             buf.set_text(
                 &mut self.font_system,
                 &run.text,

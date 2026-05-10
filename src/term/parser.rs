@@ -54,6 +54,7 @@ impl Perform for Term {
             let on = action == 'h';
             for n in params.iter().flatten().copied() {
                 match n {
+                    7 => self.auto_wrap = on,
                     25 => self.cursor_visible = on,
                     1047 | 1049 => {
                         if on {
@@ -78,36 +79,43 @@ impl Perform for Term {
                 let col = it.next().and_then(|p| p.first().copied()).unwrap_or(1).max(1);
                 self.cur_y = (row - 1).min(self.rows.saturating_sub(1));
                 self.cur_x = (col - 1).min(self.cols.saturating_sub(1));
+                self.pending_wrap = false;
                 self.dirty = true;
             }
             'A' => {
                 let n = first_param(params, 1);
                 self.cur_y = self.cur_y.saturating_sub(n);
+                self.pending_wrap = false;
                 self.dirty = true;
             }
             'B' => {
                 let n = first_param(params, 1);
                 self.cur_y = (self.cur_y + n).min(self.rows.saturating_sub(1));
+                self.pending_wrap = false;
                 self.dirty = true;
             }
             'C' => {
                 let n = first_param(params, 1);
                 self.cur_x = (self.cur_x + n).min(self.cols.saturating_sub(1));
+                self.pending_wrap = false;
                 self.dirty = true;
             }
             'D' => {
                 let n = first_param(params, 1);
                 self.cur_x = self.cur_x.saturating_sub(n);
+                self.pending_wrap = false;
                 self.dirty = true;
             }
             'G' => {
                 let n = first_param(params, 1);
                 self.cur_x = (n - 1).min(self.cols.saturating_sub(1));
+                self.pending_wrap = false;
                 self.dirty = true;
             }
             'd' => {
                 let n = first_param(params, 1);
                 self.cur_y = (n - 1).min(self.rows.saturating_sub(1));
+                self.pending_wrap = false;
                 self.dirty = true;
             }
             'J' => {

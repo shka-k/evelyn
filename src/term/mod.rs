@@ -40,6 +40,16 @@ pub struct Term {
     /// `\\e[?25 h/l` — apps like helix or less hide the cursor while
     /// rendering. The renderer skips the block when this is false.
     pub cursor_visible: bool,
+    /// DECAWM (`\\e[?7 h/l`). When false, the cursor stops at the right
+    /// edge instead of wrapping; subsequent characters overwrite the last
+    /// column. zellij and similar TUIs disable this while drawing borders.
+    pub auto_wrap: bool,
+    /// VT100 "last column" / deferred wrap. Set after a print lands in the
+    /// rightmost column with DECAWM on; the wrap is held until the next
+    /// print, and any cursor motion (CR/LF/BS/CUP/…) cancels it. Without
+    /// this, drawing a box-corner glyph at (rows-1, cols-1) would scroll
+    /// the whole screen — zellij/vim/tmux all rely on the deferral.
+    pending_wrap: bool,
     /// Bytes the terminal needs to send back to the host program (DA, DSR, …).
     /// Drained by the application after each parser advance.
     pub replies: Vec<u8>,
@@ -70,6 +80,8 @@ impl Term {
             bold: false,
             dirty: true,
             cursor_visible: true,
+            auto_wrap: true,
+            pending_wrap: false,
             replies: Vec::new(),
             saved: None,
         }
@@ -95,6 +107,7 @@ impl Term {
         }
         self.cur_x = 0;
         self.cur_y = 0;
+        self.pending_wrap = false;
         self.dirty = true;
     }
 
@@ -118,6 +131,7 @@ impl Term {
             self.cur_x = 0;
             self.cur_y = 0;
         }
+        self.pending_wrap = false;
         self.dirty = true;
     }
 
@@ -127,6 +141,7 @@ impl Term {
         self.cells = vec![Cell::default(); (cols as usize) * (rows as usize)];
         self.cur_x = self.cur_x.min(cols.saturating_sub(1));
         self.cur_y = self.cur_y.min(rows.saturating_sub(1));
+        self.pending_wrap = false;
         self.dirty = true;
     }
 
@@ -143,9 +158,20 @@ impl Term {
     fn put_char(&mut self, c: char) {
         let wide = is_wide(c);
         let needed = if wide { 2 } else { 1 };
-        if self.cur_x + needed > self.cols {
+        // Consume a deferred wrap from a previous print at the right edge.
+        if self.auto_wrap && self.pending_wrap {
+            self.pending_wrap = false;
             self.cur_x = 0;
             self.line_feed();
+        }
+        if self.cur_x + needed > self.cols {
+            if self.auto_wrap {
+                self.cur_x = 0;
+                self.line_feed();
+            } else {
+                // Overwrite mode: clamp to the last cell that will fit.
+                self.cur_x = self.cols.saturating_sub(needed);
+            }
         }
         let i = self.idx(self.cur_x, self.cur_y);
         self.cells[i] = Cell {
@@ -166,11 +192,24 @@ impl Term {
                 wide: false,
             };
         }
-        self.cur_x += needed;
+        let new_x = self.cur_x + needed;
+        if new_x >= self.cols {
+            // Park the cursor on the last written cell. With DECAWM, set the
+            // pending-wrap flag so the *next* print performs the wrap; this
+            // is what lets TUIs draw the bottom-right corner without
+            // scrolling the screen.
+            self.cur_x = self.cols.saturating_sub(needed);
+            if self.auto_wrap {
+                self.pending_wrap = true;
+            }
+        } else {
+            self.cur_x = new_x;
+        }
         self.dirty = true;
     }
 
     fn line_feed(&mut self) {
+        self.pending_wrap = false;
         if self.cur_y + 1 >= self.rows {
             // Scroll up by one line. New bottom row inherits current SGR
             // background so apps that paint a row of bg + LF get the bg
@@ -202,10 +241,12 @@ impl Term {
 
     fn carriage_return(&mut self) {
         self.cur_x = 0;
+        self.pending_wrap = false;
         self.dirty = true;
     }
 
     fn backspace(&mut self) {
+        self.pending_wrap = false;
         if self.cur_x > 0 {
             self.cur_x -= 1;
             self.dirty = true;
@@ -215,6 +256,7 @@ impl Term {
     fn tab(&mut self) {
         let next = ((self.cur_x / 8) + 1) * 8;
         self.cur_x = next.min(self.cols.saturating_sub(1));
+        self.pending_wrap = false;
         self.dirty = true;
     }
 
