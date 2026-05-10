@@ -1,21 +1,31 @@
 // newpixie-crt — adapted from the libretro newpixie-crt slang shader by
-// Mattias Gustavsson (MIT / public domain). Light barrel curvature, RGB
-// chromatic split, soft bloom, scanlines, 3-pixel shadow mask, and the
-// original "product of distances" vignette. Single-pass: bloom is faked
-// with a 13-tap weighted blur in the same fragment shader. Surface
-// format is sRGB so the fragment output stays in linear space and wgpu
-// encodes on write.
+// Mattias Gustavsson (MIT / public domain). Single-pass approximation of
+// the original slang chain: same curve, tsample stretch, RGB chromatic
+// split, polynomial color curve, scanline + 3px shadow mask, and the
+// classic 16xy(1-x)(1-y) vignette. The original's separate accumulator
+// (ghosting) and Gaussian blur passes are stood in for by a 13-tap
+// in-shader bloom; animation parts (rolling scanlines, noise, flicker)
+// are dropped because they need a per-frame uniform we don't push yet.
+//
+// The output surface is sRGB so wgpu re-encodes our linear-space output
+// on write — this is why we use a Reinhard-style linear roll-off at the
+// end instead of the original's Hable filmic, which has a gamma curve
+// baked in and would double-encode here.
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var src_sampler: sampler;
+// Theme background as a linear-space color (alpha unused). Set once at
+// startup; the corner fade lerps toward this so the vignette settles
+// into the configured theme bg rather than pure black.
+@group(0) @binding(2) var<uniform> theme_bg: vec4<f32>;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
 };
 
-// Full-screen triangle that covers [-1, 1] x [-1, 1] in clip space; uv runs
-// 0..1 across the visible region thanks to the over-sized triangle trick.
+// Full-screen triangle that covers [-1, 1] x [-1, 1] in clip space; uv
+// runs 0..1 across the visible region thanks to the over-sized triangle.
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     var positions = array<vec2<f32>, 3>(
@@ -34,64 +44,78 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
-// Slight barrel distortion. Returns the warped uv.
-fn curve(uv: vec2<f32>) -> vec2<f32> {
-    let centered = uv - vec2<f32>(0.5, 0.5);
-    let dist = centered * centered;
-    let curvature = vec2<f32>(6.0, 4.0);
-    return uv + centered * dist.yx / curvature;
-}
-
 // Tunables that shape the CRT feel.
-const SCANLINE_PERIOD: f32 = 4.0;  // physical rows per scanline cycle
-const SCANLINE_DEPTH:  f32 = 0.75; // dimmest point of a scanline (0..1)
-// 3-pixel shadow mask, ported from the original. `MASK_STRENGTH` is the
-// peak dim factor on the darkest column of the cycle.
-const MASK_STRENGTH:   f32 = 0.18;
-// Per-channel uv offsets — the slang shader uses (+0.0009, +0.0009),
-// (0, -0.0011), (-0.0015, 0); same idea here, scaled a hair smaller.
-const SPLIT_R: vec2<f32> = vec2<f32>( 0.0008,  0.0008);
-const SPLIT_G: vec2<f32> = vec2<f32>( 0.0000, -0.0010);
-const SPLIT_B: vec2<f32> = vec2<f32>(-0.0014,  0.0000);
-// Bloom: extract pixels brighter than THRESHOLD, blur via 13-tap weighted
-// Gaussian-ish kernel, add back as a phosphor halo. RADIUS_PX is the
-// outer-ring tap distance in source pixels — larger spreads further but
-// quality falls off past ~6 since we only have 13 taps to cover it.
+const CURVATURE:       f32 = 2.0;  // newpixie default
+// Pixelation: snap source-sample UV to a coarse logical-pixel grid so
+// glyphs read as chunky CRT pixels. Size in physical pixels — 1.0 off,
+// 2-3 typical.
+const PIXEL_SIZE:      f32 = 2.0;
+// 3-pixel shadow mask, matching the original `1 - 0.23 * mod(x,3)/2`.
+const MASK_STRENGTH:   f32 = 0.23;
+// Per-channel chromatic offset in *physical pixels*. The slang uses
+// uv-space (+0.0009, -0.0011, -0.0015); pixel-units stays consistent
+// across resolutions and survives PIXEL_SIZE quantization.
+const SPLIT_R_PX: vec2<f32> = vec2<f32>( 1.6,  1.6);
+const SPLIT_G_PX: vec2<f32> = vec2<f32>( 0.0, -2.0);
+const SPLIT_B_PX: vec2<f32> = vec2<f32>(-2.8,  0.0);
+// Bloom: extract pixels brighter than THRESHOLD, blur via 13-tap
+// weighted Gaussian-ish kernel, add as a phosphor halo. Stands in for
+// the original's separate horizontal+vertical Gaussian blur passes.
 const BLOOM_THRESHOLD: f32 = 0.35;
-const BLOOM_INTENSITY: f32 = 0.75;
+const BLOOM_INTENSITY: f32 = 0.55;
 const BLOOM_RADIUS_PX: f32 = 4.0;
-// Newpixie vignette: `16 * x * y * (1-x) * (1-y)` peaks at 1.0 in the
-// center and is 0 along every edge. Multiplied by VIG_GAIN to slightly
-// overshoot 1.0 in the body for the lit-phosphor look; VIG_FLOOR is
-// added inside the sqrt so corners settle at a soft dim instead of
-// crushing to true black.
-const VIG_GAIN:  f32 = 1.55;
-const VIG_FLOOR: f32 = 0.04;
+// Vignette: `16xy(1-x)(1-y)` peaks at 1.0 in the center, 0 at edges.
+// Multiplied by VIG_GAIN for the original's ~1.3x lit-phosphor punch.
+const VIG_GAIN:  f32 = 1.30;
+// Ambient phosphor lift on the inside of the curved screen — the slang
+// uses +0.02 per channel, but in our linear-space pipeline that gets
+// gamma-expanded to a visible gray. Keep it tiny.
+const AMBIENT:   f32 = 0.005;
 
-// RGB chromatic split sample. Pulls each channel from a slightly offset
-// uv so bright glyphs get a faint phosphor color fringe.
-fn split_sample(uv: vec2<f32>) -> vec3<f32> {
-    let r = textureSample(src_tex, src_sampler, clamp(uv + SPLIT_R, vec2<f32>(0.0), vec2<f32>(1.0))).r;
-    let g = textureSample(src_tex, src_sampler, clamp(uv + SPLIT_G, vec2<f32>(0.0), vec2<f32>(1.0))).g;
-    let b = textureSample(src_tex, src_sampler, clamp(uv + SPLIT_B, vec2<f32>(0.0), vec2<f32>(1.0))).b;
-    return vec3<f32>(r, g, b);
+// Original newpixie barrel curvature. Per-axis stretch, then a
+// quadratic widening proportional to the orthogonal coordinate, then
+// the inset `*0.92 + 0.04` that places the visible CRT inside a small
+// bezel. Returns uv that may extend outside [0,1] in the corners.
+fn curve(uv: vec2<f32>) -> vec2<f32> {
+    var u = uv - vec2<f32>(0.5);
+    u *= vec2<f32>(0.925, 1.095);
+    u *= CURVATURE;
+    u.x *= 1.0 + pow(abs(u.y) / 4.0, 2.0);
+    u.y *= 1.0 + pow(abs(u.x) / 3.0, 2.0);
+    u /= CURVATURE;
+    u += vec2<f32>(0.5);
+    return u * 0.92 + vec2<f32>(0.04);
 }
 
-// Brightness extractor — return the part of `c` above BLOOM_THRESHOLD,
-// preserving hue (scale by `excess / lum`).
+// `tsample` from the original: a slight stretch + offset baked into
+// every sample, plus a 1.25x brightness boost. The `pow(2.2)` gamma
+// decode is a no-op for us because wgpu already returns linear values
+// from the sRGB source texture.
+fn tsample(tc: vec2<f32>, dim: vec2<f32>) -> vec3<f32> {
+    var c = tc * vec2<f32>(1.025, 0.92) + vec2<f32>(-0.0125, 0.04);
+    c = clamp(quantize(c, dim), vec2<f32>(0.0), vec2<f32>(1.0));
+    return textureSample(src_tex, src_sampler, c).rgb * 1.25;
+}
+
+// Snap UV to the logical-pixel grid set by PIXEL_SIZE.
+fn quantize(uv: vec2<f32>, dim: vec2<f32>) -> vec2<f32> {
+    let g = dim / PIXEL_SIZE;
+    return (floor(uv * g) + 0.5) / g;
+}
+
+// Brightness extractor — keep only the part of `c` above
+// BLOOM_THRESHOLD, preserving hue.
 fn bright(c: vec3<f32>) -> vec3<f32> {
     let lum = dot(c, vec3<f32>(0.299, 0.587, 0.114));
     let factor = max(lum - BLOOM_THRESHOLD, 0.0) / max(lum, 1e-6);
     return c * factor;
 }
 
-// 13-tap weighted bloom: center + 8 inner-ring taps + 4 outer cardinals.
-// Each tap goes through `bright` so the result is just the spread glow,
-// suitable for additive composition over the body color.
+// 13-tap weighted bloom. Center + 8 inner-ring + 4 outer cardinals.
+// Each tap goes through `bright` so the result is just the spread glow.
 fn bloom(uv: vec2<f32>, dim: vec2<f32>) -> vec3<f32> {
     let t = BLOOM_RADIUS_PX / dim;
     var s = bright(textureSample(src_tex, src_sampler, uv).rgb) * 1.00;
-    // Inner ring (radius 1·t) — strong contribution.
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>( 1.0,  0.0) * t).rgb) * 0.70;
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>(-1.0,  0.0) * t).rgb) * 0.70;
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>( 0.0,  1.0) * t).rgb) * 0.70;
@@ -100,72 +124,77 @@ fn bloom(uv: vec2<f32>, dim: vec2<f32>) -> vec3<f32> {
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>(-0.7,  0.7) * t).rgb) * 0.50;
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>( 0.7, -0.7) * t).rgb) * 0.50;
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>(-0.7, -0.7) * t).rgb) * 0.50;
-    // Outer cardinals (radius 2·t) — faint long-tail glow.
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>( 2.0,  0.0) * t).rgb) * 0.30;
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>(-2.0,  0.0) * t).rgb) * 0.30;
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>( 0.0,  2.0) * t).rgb) * 0.30;
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>( 0.0, -2.0) * t).rgb) * 0.30;
-    return s / 7.6; // sum of weights
+    return s / 7.6;
 }
 
-// Reinhard-style highlight roll-off. Pure linear-space operator — no
-// gamma baked in (unlike the Hable filmic in the original, which assumes
-// the framebuffer is non-sRGB). Our surface is sRGB so wgpu re-encodes
-// on write; mixing in a gamma'd tone-map here produced washed-out
-// midtones. This curve only bends values above ~1.0 back into range.
+// Reinhard-style highlight roll-off in linear space. The original's
+// Hable filmic doubles as a gamma encode and would double-encode on our
+// sRGB surface. This curve only bends above-1 values back into range.
 fn rolloff(c: vec3<f32>) -> vec3<f32> {
     return c / (1.0 + max(c - vec3<f32>(1.0), vec3<f32>(0.0)));
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let warped = curve(in.uv);
-
-    // Clamp-sample at the curved screen edge — vignette below crushes
-    // those pixels to near-black anyway, so the bezel reads as a smooth
-    // gradient instead of a hard cutoff.
-    let sample_uv = clamp(warped, vec2<f32>(0.0), vec2<f32>(1.0));
     let dim = vec2<f32>(textureDimensions(src_tex, 0));
 
-    // Per-channel chromatic split. The original lifts every pixel by
-    // +0.02 here, but that constant sits in linear space and gets
-    // gamma-expanded to a visible gray on our sRGB surface — which
-    // floated all the blacks. Skip it; bloom + ambient below still
-    // give phosphor warmth on lit cells.
-    var color = split_sample(sample_uv);
+    // Original's blend of curve and identity, then a ~10% expand so
+    // content fills slightly past the curved boundary, plus a tiny
+    // alignment nudge — the same recipe the slang shader uses.
+    let curved_uv = mix(curve(in.uv), in.uv, 0.4);
+    let scale = -0.101;
+    let scuv = curved_uv * (1.0 - scale)
+        + vec2<f32>(scale * 0.5)
+        + vec2<f32>(0.003, -0.001);
 
-    // Soft saturation bias — original uses (0.95, 1.05, 0.95) to nudge
-    // greens up; gentler here so the theme palette stays recognizable.
-    color *= vec3<f32>(0.99, 1.02, 0.99);
+    let texel = vec2<f32>(1.0) / dim;
 
-    // Bloom: blurred bright pixels added on top, before scan/mask so the
-    // halo crosses scanlines like real phosphor glow.
-    color = color + BLOOM_INTENSITY * bloom(sample_uv, dim);
+    // RGB chromatic split via tsample. Per-channel offsets in pixel
+    // units; tsample applies the stretch + brightness boost + quantize.
+    var col = vec3<f32>(0.0);
+    col.r = tsample(scuv + SPLIT_R_PX * texel, dim).r + AMBIENT;
+    col.g = tsample(scuv + SPLIT_G_PX * texel, dim).g + AMBIENT;
+    col.b = tsample(scuv + SPLIT_B_PX * texel, dim).b + AMBIENT;
 
-    // Thick scanlines spanning multiple physical rows.
-    let line_phase = fract(warped.y * dim.y / SCANLINE_PERIOD);
-    let scan = mix(SCANLINE_DEPTH, 1.0, smoothstep(0.0, 0.5, abs(line_phase - 0.5) * 2.0));
-    color *= scan;
+    // Bloom — soft phosphor halo standing in for the original's blur
+    // pass. Added before the polynomial so the halo gets the same
+    // brightness treatment as direct samples.
+    col = col + BLOOM_INTENSITY * bloom(clamp(scuv, vec2<f32>(0.0), vec2<f32>(1.0)), dim);
 
-    // 3-pixel shadow mask in framebuffer space — bright/medium/dim cycle.
-    // Same shape as the original `1.0 - 0.23 * clamp(mod(x,3)/2, 0, 1)`,
-    // with strength factored out so it can be tuned.
+    // Saturation bias — original uses (0.95, 1.05, 0.95) for the green
+    // phosphor cast. Faithful match here.
+    col *= vec3<f32>(0.95, 1.05, 0.95);
+
+    // Polynomial color curve, ported verbatim. Lifts midtones and
+    // compresses to give the punchy phosphor response.
+    col = clamp(
+        col * 1.3 + 0.75 * col * col + 1.25 * col * col * col * col * col,
+        vec3<f32>(0.0),
+        vec3<f32>(10.0),
+    );
+
+    // Vignette on `curved_uv`, matching the original. Brightens the body
+    // by ~1.3x and falls off to 0 at the edges. We then lerp toward
+    // theme_bg using the same shape so the corners settle at the
+    // configured background instead of black.
+    let v = 16.0 * curved_uv.x * curved_uv.y
+        * (1.0 - curved_uv.x) * (1.0 - curved_uv.y);
+    let vig_alpha = sqrt(max(v, 0.0));
+    let lit = col * VIG_GAIN;
+    col = mix(theme_bg.rgb, lit, vig_alpha);
+
+    // Static-Y scanlines, no time animation: same `0.35 + 0.18*sin`
+    // shape as the original, then `pow(s, 0.9)`. Multiplies the body.
+    let scans = clamp(0.35 + 0.18 * sin(-in.uv.y * dim.y * 1.5), 0.0, 1.0);
+    col *= pow(scans, 0.9);
+
+    // 3-pixel vertical shadow mask in framebuffer space.
     let mask_phase = clamp((in.clip.x - floor(in.clip.x / 3.0) * 3.0) / 2.0, 0.0, 1.0);
-    color *= 1.0 - MASK_STRENGTH * mask_phase;
+    col *= 1.0 - MASK_STRENGTH * mask_phase;
 
-    // Newpixie vignette on the unwarped uv. Smooth product → no seam
-    // between the curved body and the corners; sqrt curve keeps the
-    // falloff gentle through the body and steeper near the edges.
-    let v = 16.0 * in.uv.x * in.uv.y * (1.0 - in.uv.x) * (1.0 - in.uv.y);
-    let vig = VIG_GAIN * sqrt(VIG_FLOOR + max(v, 0.0));
-    color *= vig;
-
-    // Tiny ambient phosphor floor — kept very small because it lives in
-    // linear space, modulated by mask/scan/vig so it doesn't wash the
-    // bezel area. Only really visible inside the lit body.
-    color += vec3<f32>(0.003) * scan * vig;
-
-    // Roll bright bloom peaks back; leave dark/mid values alone so we
-    // don't relift blacks toward gray.
-    return vec4<f32>(rolloff(color), 1.0);
+    return vec4<f32>(rolloff(col), 1.0);
 }

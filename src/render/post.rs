@@ -4,14 +4,18 @@
 use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
-    BlendState, ColorTargetState, ColorWrites, CommandEncoder, Device, Extent3d, FilterMode,
-    FragmentState, LoadOp, MipmapFilterMode, MultisampleState, Operations,
-    PipelineLayoutDescriptor, PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
-    ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Texture, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
-    TextureViewDescriptor, TextureViewDimension, VertexState,
+    BlendState, Buffer, BufferBindingType, BufferUsages, ColorTargetState, ColorWrites,
+    CommandEncoder, Device, Extent3d, FilterMode, FragmentState, LoadOp, MipmapFilterMode,
+    MultisampleState, Operations, PipelineLayoutDescriptor, PrimitiveState,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
+    Sampler, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor, ShaderSource,
+    ShaderStages, StoreOp, Texture, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
+    VertexState,
 };
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
+
+use crate::color::{default_bg, Rgb};
 
 pub struct PostProcessor {
     /// Offscreen color target. The cell grid renders into this; the
@@ -19,6 +23,9 @@ pub struct PostProcessor {
     texture: Texture,
     view: TextureView,
     sampler: Sampler,
+    /// Uniform buffer holding the theme background as a linear-space
+    /// vec4 — shaders can lerp toward it for the corner fade.
+    uniforms: Buffer,
     bind_group_layout: BindGroupLayout,
     bind_group: BindGroup,
     pipeline: RenderPipeline,
@@ -66,9 +73,26 @@ impl PostProcessor {
                     ty: BindingType::Sampler(SamplerBindingType::Filtering),
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
-        let bind_group = make_bind_group(device, &bind_group_layout, &view, &sampler);
+        // Theme bg in linear space, padded to vec4. Written once at startup
+        // — the theme is fixed for the lifetime of the process.
+        let uniforms = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("post-uniforms"),
+            contents: bytemuck::cast_slice(&[theme_bg_linear_vec4(default_bg())]),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+        let bind_group = make_bind_group(device, &bind_group_layout, &view, &sampler, &uniforms);
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("post-shader"),
@@ -109,6 +133,7 @@ impl PostProcessor {
             texture,
             view,
             sampler,
+            uniforms,
             bind_group_layout,
             bind_group,
             pipeline,
@@ -125,8 +150,13 @@ impl PostProcessor {
         let (texture, view) = create_offscreen(device, self.format, width, height);
         self.texture = texture;
         self.view = view;
-        self.bind_group =
-            make_bind_group(device, &self.bind_group_layout, &self.view, &self.sampler);
+        self.bind_group = make_bind_group(
+            device,
+            &self.bind_group_layout,
+            &self.view,
+            &self.sampler,
+            &self.uniforms,
+        );
         self.width = width;
         self.height = height;
     }
@@ -190,6 +220,7 @@ fn make_bind_group(
     layout: &BindGroupLayout,
     view: &TextureView,
     sampler: &Sampler,
+    uniforms: &Buffer,
 ) -> BindGroup {
     device.create_bind_group(&BindGroupDescriptor {
         label: Some("post-bg"),
@@ -203,6 +234,30 @@ fn make_bind_group(
                 binding: 1,
                 resource: BindingResource::Sampler(sampler),
             },
+            BindGroupEntry {
+                binding: 2,
+                resource: uniforms.as_entire_binding(),
+            },
         ],
     })
+}
+
+/// sRGB → linear conversion matching the cell-pass clear color, packed
+/// into a `vec4` for the uniform buffer (alpha unused, set to 1).
+fn theme_bg_linear_vec4(bg: Rgb) -> [f32; 4] {
+    [
+        srgb_to_linear(bg.0) as f32,
+        srgb_to_linear(bg.1) as f32,
+        srgb_to_linear(bg.2) as f32,
+        1.0,
+    ]
+}
+
+fn srgb_to_linear(c: u8) -> f64 {
+    let s = c as f64 / 255.0;
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
 }

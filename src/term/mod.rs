@@ -271,12 +271,15 @@ impl Term {
 
     fn line_feed(&mut self) {
         self.pending_wrap = false;
-        // Only scroll when the cursor is on the scroll region's bottom row
-        // (or below it — happens when an app moves cursor outside region
-        // then issues LF). Otherwise just step down a row.
-        if self.cur_y >= self.scroll_bot {
+        // Scroll the DECSTBM region only when the cursor sits exactly on
+        // its bottom row. If the cursor is below the region (e.g. zellij
+        // drawing into a status row past `scroll_bot`), LF must just walk
+        // the cursor down — scrolling the region from there would push
+        // pane content up under the status bar, which is what made the
+        // inner shell prompt sometimes vanish on startup.
+        if self.cur_y == self.scroll_bot {
             self.scroll_up_in_region(1);
-        } else {
+        } else if self.cur_y + 1 < self.rows {
             self.cur_y += 1;
         }
         self.dirty = true;
@@ -362,7 +365,9 @@ impl Term {
         let last = self.rows.saturating_sub(1);
         let top = top.min(last);
         let bot = bot.min(last);
-        if top < bot {
+        // `top == bot` is a valid 1-row region; only `top > bot` is
+        // invalid and falls back to the full screen.
+        if top <= bot {
             self.scroll_top = top;
             self.scroll_bot = bot;
         } else {
@@ -413,6 +418,80 @@ impl Term {
         } else if self.cur_y > 0 {
             self.cur_y -= 1;
         }
+        self.dirty = true;
+    }
+
+    /// Insert `n` blank cells at the cursor (CSI @, ICH). Cells from the
+    /// cursor to the row end shift right; ones falling off the right are
+    /// lost. Cursor stays put.
+    pub(super) fn insert_chars(&mut self, n: u16) {
+        let cols = self.cols as usize;
+        if cols == 0 {
+            return;
+        }
+        let row_start = (self.cur_y as usize) * cols;
+        let cur = (self.cur_x as usize).min(cols);
+        let n = (n as usize).min(cols - cur);
+        if n == 0 {
+            return;
+        }
+        let row_end = row_start + cols;
+        let move_src_end = row_end - n;
+        let move_src_start = row_start + cur;
+        if move_src_start < move_src_end {
+            self.cells.copy_within(move_src_start..move_src_end, move_src_start + n);
+        }
+        let blank = self.blank_cell();
+        for cell in &mut self.cells[move_src_start..move_src_start + n] {
+            *cell = blank;
+        }
+        self.pending_wrap = false;
+        self.dirty = true;
+    }
+
+    /// Delete `n` cells at the cursor (CSI P, DCH). Cells right of the
+    /// cursor shift left; the right end is filled with blanks.
+    pub(super) fn delete_chars(&mut self, n: u16) {
+        let cols = self.cols as usize;
+        if cols == 0 {
+            return;
+        }
+        let row_start = (self.cur_y as usize) * cols;
+        let cur = (self.cur_x as usize).min(cols);
+        let n = (n as usize).min(cols - cur);
+        if n == 0 {
+            return;
+        }
+        let row_end = row_start + cols;
+        let src_start = row_start + cur + n;
+        let dst_start = row_start + cur;
+        if src_start < row_end {
+            self.cells.copy_within(src_start..row_end, dst_start);
+        }
+        let blank = self.blank_cell();
+        let blank_start = row_end - n;
+        for cell in &mut self.cells[blank_start..row_end] {
+            *cell = blank;
+        }
+        self.pending_wrap = false;
+        self.dirty = true;
+    }
+
+    /// Erase `n` cells in place at the cursor (CSI X, ECH). Cells stay
+    /// where they are, just blanked with current SGR bg.
+    pub(super) fn erase_chars(&mut self, n: u16) {
+        let cols = self.cols as usize;
+        if cols == 0 {
+            return;
+        }
+        let row_start = (self.cur_y as usize) * cols;
+        let cur = (self.cur_x as usize).min(cols);
+        let n = (n as usize).min(cols - cur);
+        let blank = self.blank_cell();
+        for cell in &mut self.cells[row_start + cur..row_start + cur + n] {
+            *cell = blank;
+        }
+        self.pending_wrap = false;
         self.dirty = true;
     }
 

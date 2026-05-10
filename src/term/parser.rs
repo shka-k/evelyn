@@ -165,17 +165,45 @@ impl Perform for Term {
                 self.scroll_down_in_region(first_param(params, 1));
                 self.dirty = true;
             }
+            '@' => self.insert_chars(first_param(params, 1)),
+            'P' => self.delete_chars(first_param(params, 1)),
+            'X' => self.erase_chars(first_param(params, 1)),
+            't' => {
+                // Window manipulation queries. Reply to the size queries
+                // so apps that gate on them (zellij occasionally does
+                // for pixel-accurate layout) don't spin waiting.
+                let mode = first_param(params, 0);
+                match mode {
+                    14 => {
+                        // Report cell size in pixels — we don't know the
+                        // host pixel size from the post pass, so return a
+                        // conservative default. Apps mostly just need a
+                        // non-empty reply to unblock.
+                        self.replies.extend_from_slice(b"\x1b[4;600;800t");
+                    }
+                    18 => {
+                        // Report screen size in characters.
+                        let s = format!("\x1b[8;{};{}t", self.rows, self.cols);
+                        self.replies.extend_from_slice(s.as_bytes());
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
 }
 
 impl Term {
-    /// Reply to a Device Attributes request so apps like fish don't time out.
+    /// Reply to a Device Attributes request so apps like fish don't time
+    /// out. Bumped from VT102 to VT220 (`?62;…`) advertising 132-column,
+    /// printer, ANSI text locator, and selectable charset extensions —
+    /// zellij/tmux gate part of their init on this and the older VT102
+    /// reply could leave them spinning long enough to drop the first
+    /// inner-shell prompt.
     fn dispatch_da(&mut self, intermediates: &[u8]) {
         if intermediates.is_empty() {
-            // Primary DA — VT102 with Advanced Video Option.
-            self.replies.extend_from_slice(b"\x1b[?6c");
+            self.replies.extend_from_slice(b"\x1b[?62;1;2;6;9c");
         } else if intermediates == b">" {
             // Secondary DA — pose as xterm patch level 0.
             self.replies.extend_from_slice(b"\x1b[>0;0;0c");
