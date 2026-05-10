@@ -49,15 +49,19 @@ const CURVATURE:       f32 = 2.0;  // newpixie default
 // Pixelation: snap source-sample UV to a coarse logical-pixel grid so
 // glyphs read as chunky CRT pixels. Size in physical pixels — 1.0 off,
 // 2-3 typical.
-const PIXEL_SIZE:      f32 = 1.0;
+const PIXEL_SIZE:      f32 = 2.0;
 // 3-pixel shadow mask, matching the original `1 - 0.23 * mod(x,3)/2`.
 const MASK_STRENGTH:   f32 = 0.23;
 // Per-channel chromatic offset in *physical pixels*. The slang uses
 // uv-space (+0.0009, -0.0011, -0.0015); pixel-units stays consistent
-// across resolutions and survives PIXEL_SIZE quantization.
-const SPLIT_R_PX: vec2<f32> = vec2<f32>( 1.6,  1.6);
-const SPLIT_G_PX: vec2<f32> = vec2<f32>( 0.0, -2.0);
-const SPLIT_B_PX: vec2<f32> = vec2<f32>(-2.8,  0.0);
+// across resolutions and survives PIXEL_SIZE quantization. Horizontal
+// only — vertical splits make the visible centroid of multi-channel
+// colors land at different y depending on which channels are present
+// (magenta = R+B with no G floats up, green sits low, etc.), which
+// reads as the text drifting up/down by color.
+const SPLIT_R_PX: vec2<f32> = vec2<f32>( 1.6, 0.0);
+const SPLIT_G_PX: vec2<f32> = vec2<f32>( 0.0, 0.0);
+const SPLIT_B_PX: vec2<f32> = vec2<f32>(-2.8, 0.0);
 // Bloom: extract pixels brighter than THRESHOLD, blur via 13-tap
 // weighted Gaussian-ish kernel, add as a phosphor halo. Stands in for
 // the original's separate horizontal+vertical Gaussian blur passes.
