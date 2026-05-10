@@ -2,7 +2,10 @@ use winit::event::{KeyEvent, Modifiers};
 use winit::keyboard::{Key, NamedKey};
 
 /// Translate a keyboard event into bytes to be written to the PTY.
-pub fn encode_key(event: &KeyEvent, mods: &Modifiers) -> Option<Vec<u8>> {
+/// `app_cursor_keys` reflects DECCKM — when set, bare cursor keys go out
+/// as SS3 (`ESC O X`) instead of CSI (`ESC [ X`), which is what vi /
+/// vim / helix / less actually look up in their key tables.
+pub fn encode_key(event: &KeyEvent, mods: &Modifiers, app_cursor_keys: bool) -> Option<Vec<u8>> {
     if !event.state.is_pressed() {
         return None;
     }
@@ -14,7 +17,7 @@ pub fn encode_key(event: &KeyEvent, mods: &Modifiers) -> Option<Vec<u8>> {
     let alt = m.alt_key() || m.super_key();
 
     if let Key::Named(named) = &event.logical_key {
-        return encode_named(named, shift, alt, ctrl);
+        return encode_named(named, shift, alt, ctrl, app_cursor_keys);
     }
 
     // Character keys: prefer event.text (which already accounts for shift / dead keys).
@@ -34,14 +37,24 @@ fn modifier_code(shift: bool, alt: bool, ctrl: bool) -> u8 {
     1u8 + (shift as u8) + 2 * (alt as u8) + 4 * (ctrl as u8)
 }
 
-fn encode_named(named: &NamedKey, shift: bool, alt: bool, ctrl: bool) -> Option<Vec<u8>> {
+fn encode_named(
+    named: &NamedKey,
+    shift: bool,
+    alt: bool,
+    ctrl: bool,
+    app_cursor_keys: bool,
+) -> Option<Vec<u8>> {
     let m_code = modifier_code(shift, alt, ctrl);
     let modded = m_code > 1;
 
-    // Cursor / Home / End: `\x1b[X` bare, `\x1b[1;<m>X` with modifier.
+    // Cursor / Home / End: bare goes SS3 (`ESC O X`) when DECCKM is set,
+    // otherwise CSI (`ESC [ X`). Modified form is always CSI with the
+    // xterm modifier code — DECCKM only affects the bare sequence.
     let csi_letter = |letter: u8| -> Vec<u8> {
         if modded {
             format!("\x1b[1;{}{}", m_code, letter as char).into_bytes()
+        } else if app_cursor_keys {
+            vec![0x1b, b'O', letter]
         } else {
             vec![0x1b, b'[', letter]
         }

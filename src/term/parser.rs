@@ -68,6 +68,7 @@ impl Perform for Term {
             let on = action == 'h';
             for n in params.iter().flatten().copied() {
                 match n {
+                    1 => self.app_cursor_keys = on,
                     7 => self.auto_wrap = on,
                     25 => self.cursor_visible = on,
                     1047 | 1049 => {

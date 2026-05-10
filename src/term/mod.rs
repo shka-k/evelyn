@@ -68,6 +68,11 @@ pub struct Term {
     /// edge instead of wrapping; subsequent characters overwrite the last
     /// column. zellij and similar TUIs disable this while drawing borders.
     pub auto_wrap: bool,
+    /// DECCKM (`\\e[?1 h/l`). When set, cursor / arrow keys must be sent
+    /// as SS3 (`ESC O X`) instead of CSI (`ESC [ X`). vi/vim/helix/less
+    /// all enable this on entry — without honoring it, arrow keys arrive
+    /// as the wrong sequence and the app silently ignores them.
+    pub app_cursor_keys: bool,
     /// VT100 "last column" / deferred wrap. Set after a print lands in the
     /// rightmost column with DECAWM on; the wrap is held until the next
     /// print, and any cursor motion (CR/LF/BS/CUP/…) cancels it. Without
@@ -132,6 +137,7 @@ impl Term {
             dirty: true,
             cursor_visible: true,
             auto_wrap: true,
+            app_cursor_keys: false,
             pending_wrap: false,
             replies: Vec::new(),
             scroll_top: 0,

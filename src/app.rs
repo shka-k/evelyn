@@ -126,7 +126,7 @@ impl App {
         if !self.preedit.is_empty() {
             return;
         }
-        if let Some(bytes) = encode_key(&event, &self.modifiers) {
+        if let Some(bytes) = encode_key(&event, &self.modifiers, self.term.app_cursor_keys) {
             // Snap the scrollback view back to the live bottom on user
             // input — matches every other terminal: typing pulls you
             // out of history.
@@ -167,20 +167,25 @@ impl App {
         }
         self.scroll_accum -= step as f32;
 
-        if self.term.is_alt_screen() {
-            // Alt-screen apps (less, helix, vim) usually don't enable mouse
-            // reporting. Synthesize cursor up/down keys — the xterm
-            // "alternateScroll" convention — so j/k-style navigation gets
-            // driven by the wheel without us implementing full mouse
-            // reporting yet.
+        // "An interactive full-screen app is running" heuristic: alt-screen
+        // OR DECCKM (app cursor keys). Classic vi doesn't use alt-screen
+        // but does set DECCKM — without the second clause, wheeling in vi
+        // would drive scrollback instead of moving its cursor.
+        if self.term.is_alt_screen() || self.term.app_cursor_keys {
+            // Synthesize cursor up/down keys — the xterm "alternateScroll"
+            // convention — so j/k-style navigation gets driven by the
+            // wheel without us implementing full mouse reporting yet.
+            // Match DECCKM so vi/vim/helix actually pick up the keys
+            // (they bind the SS3 form when app_cursor_keys is on).
             let (byte, count) = if step > 0 {
                 (b'A', step as usize)
             } else {
                 (b'B', (-step) as usize)
             };
+            let intro: u8 = if self.term.app_cursor_keys { b'O' } else { b'[' };
             let mut bytes = Vec::with_capacity(count * 3);
             for _ in 0..count {
-                bytes.extend_from_slice(&[0x1b, b'[', byte]);
+                bytes.extend_from_slice(&[0x1b, intro, byte]);
             }
             if let Some(p) = &self.pty {
                 p.write(&bytes);
