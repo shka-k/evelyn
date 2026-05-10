@@ -53,7 +53,7 @@ const CURVATURE:       f32 = 2.0;  // newpixie default
 // Pixelation: snap source-sample UV to a coarse logical-pixel grid so
 // glyphs read as chunky CRT pixels. Size in physical pixels — 1.0 off,
 // 2-3 typical.
-const PIXEL_SIZE:      f32 = 2.0;
+const PIXEL_SIZE:      f32 = 2.5;
 // 3-pixel shadow mask, matching the original `1 - 0.23 * mod(x,3)/2`.
 const MASK_STRENGTH:   f32 = 0.23;
 // Per-channel chromatic offset in *physical pixels*. The slang uses
@@ -73,8 +73,19 @@ const BLOOM_THRESHOLD: f32 = 0.35;
 const BLOOM_INTENSITY: f32 = 0.55;
 const BLOOM_RADIUS_PX: f32 = 4.0;
 // Vignette: `16xy(1-x)(1-y)` peaks at 1.0 in the center, 0 at edges.
-// Multiplied by VIG_GAIN for the original's ~1.3x lit-phosphor punch.
-const VIG_GAIN:  f32 = 1.30;
+// Multiplied by VIG_GAIN for the lit-phosphor punch in the screen body.
+const VIG_GAIN:  f32 = 1.55;
+// Additive center glow weighted by the same vignette shape. Multiplying
+// by VIG_GAIN only scales what's already lit, so dark background pixels
+// stay dark even at the center. CENTER_LIFT adds a flat amount on top,
+// so the whole middle of the screen reads as gently emissive — closer
+// to the ambient phosphor glow of a real CRT.
+const CENTER_LIFT: f32 = 0.08;
+// Shape of the vignette mix. The slang shader uses sqrt (≈0.5) which
+// keeps the corners pretty lit; raising the exponent pulls the falloff
+// inward so the four-corner gradient toward theme_bg reads more clearly
+// without darkening the body. 1.0 ≈ linear; >1.0 sharpens further.
+const VIG_FALLOFF: f32 = 0.85;
 // Ambient phosphor lift on the inside of the curved screen — the slang
 // uses +0.02 per channel, but in our linear-space pipeline that gets
 // gamma-expanded to a visible gray. Keep it tiny.
@@ -210,8 +221,8 @@ fn fs_main(in: VsOut) -> FsOut {
     // configured background instead of black.
     let v = 16.0 * curved_uv.x * curved_uv.y
         * (1.0 - curved_uv.x) * (1.0 - curved_uv.y);
-    let vig_alpha = sqrt(max(v, 0.0));
-    let lit = col * VIG_GAIN;
+    let vig_alpha = pow(max(v, 0.0), VIG_FALLOFF);
+    let lit = col * VIG_GAIN + vec3<f32>(CENTER_LIFT) * vig_alpha;
     col = mix(theme_bg.rgb, lit, vig_alpha);
 
     // Static-Y scanlines, no time animation: same `0.35 + 0.18*sin`
