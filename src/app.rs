@@ -265,14 +265,16 @@ impl ApplicationHandler<UserEvent> for App {
 /// Decode the bundled PNG into RGBA and hand it to winit. Returns `None`
 /// on failure — the window just runs without a custom icon then.
 fn decode_window_icon() -> Option<Icon> {
-    let decoder = png::Decoder::new(WINDOW_ICON_PNG);
+    // png 0.18+ wants `BufRead + Seek`; wrap the embedded slice in Cursor.
+    let decoder = png::Decoder::new(std::io::Cursor::new(WINDOW_ICON_PNG));
     let mut reader = decoder.read_info().ok()?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![0u8; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     let (w, h) = (info.width, info.height);
+    let used = &buf[..info.buffer_size()];
     let rgba: Vec<u8> = match info.color_type {
-        png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
-        png::ColorType::Rgb => buf[..info.buffer_size()]
+        png::ColorType::Rgba => used.to_vec(),
+        png::ColorType::Rgb => used
             .chunks_exact(3)
             .flat_map(|c| [c[0], c[1], c[2], 255])
             .collect(),
