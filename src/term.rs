@@ -56,6 +56,12 @@ impl Term {
         }
     }
 
+    fn reset_attrs(&mut self) {
+        self.fg = DEFAULT_FG;
+        self.bg = DEFAULT_BG;
+        self.bold = false;
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;
@@ -152,20 +158,14 @@ impl Term {
     fn sgr(&mut self, params: &Params) {
         let flat: Vec<u16> = params.iter().flatten().copied().collect();
         if flat.is_empty() {
-            self.fg = DEFAULT_FG;
-            self.bg = DEFAULT_BG;
-            self.bold = false;
+            self.reset_attrs();
             return;
         }
         let mut i = 0;
         while i < flat.len() {
             let p = flat[i];
             match p {
-                0 => {
-                    self.fg = DEFAULT_FG;
-                    self.bg = DEFAULT_BG;
-                    self.bold = false;
-                }
+                0 => self.reset_attrs(),
                 1 => self.bold = true,
                 22 => self.bold = false,
                 30..=37 => self.fg = ansi_basic((p - 30) as u8, false),

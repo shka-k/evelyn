@@ -13,6 +13,12 @@ use crate::pty::Pty;
 use crate::render::Renderer;
 use crate::term::Term;
 
+const WINDOW_TITLE: &str = "evelyn";
+const INITIAL_WINDOW_SIZE_LOGICAL: (f64, f64) = (960.0, 600.0);
+const INITIAL_COLS: u16 = 80;
+const INITIAL_ROWS: u16 = 24;
+const IME_CANDIDATE_WIDTH_CELLS: f64 = 10.0;
+
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     PtyData(Vec<u8>),
@@ -43,7 +49,7 @@ impl App {
             proxy,
             window: None,
             renderer: None,
-            term: Term::new(80, 24),
+            term: Term::new(INITIAL_COLS, INITIAL_ROWS),
             parser: Parser::new(),
             pty: None,
             modifiers: Modifiers::default(),
@@ -62,7 +68,7 @@ impl App {
         let cell_h = r.line_height as f64 / scale;
         w.set_ime_cursor_area(
             LogicalPosition::new(x, y),
-            LogicalSize::new(cell_w * 10.0, cell_h),
+            LogicalSize::new(cell_w * IME_CANDIDATE_WIDTH_CELLS, cell_h),
         );
     }
 }
@@ -73,8 +79,11 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         let attrs = WindowAttributes::default()
-            .with_title("evelyn")
-            .with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0));
+            .with_title(WINDOW_TITLE)
+            .with_inner_size(LogicalSize::new(
+                INITIAL_WINDOW_SIZE_LOGICAL.0,
+                INITIAL_WINDOW_SIZE_LOGICAL.1,
+            ));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {

@@ -13,8 +13,14 @@ use wgpu::{
 };
 use winit::window::Window;
 
+use crate::config::CONFIG;
 use crate::quad::{QuadPipeline, Rect};
-use crate::term::{Term, DEFAULT_BG};
+use crate::term::{Rgb, Term, DEFAULT_BG, DEFAULT_FG};
+
+const CURSOR_COLOR_RGBA: [f32; 4] = [0.90, 0.78, 0.20, 1.0];
+const CURSOR_STROKE_PT: f32 = 2.0;
+const PREEDIT_COLOR: Rgb = Rgb(0xff, 0xe0, 0x70);
+const PREEDIT_UNDERLINE_RGBA: [f32; 4] = [1.0, 0.88, 0.44, 1.0];
 
 pub struct Renderer {
     pub window: Arc<Window>,
@@ -80,9 +86,8 @@ impl Renderer {
         let quads = QuadPipeline::new(&device, format);
 
         let scale = window.scale_factor() as f32;
-        let font_size_pt: f32 = 14.0;
-        let font_size: f32 = (font_size_pt * scale).round();
-        let line_height: f32 = (font_size * 1.3_f32).round();
+        let font_size: f32 = (CONFIG.font.size_pt * scale).round();
+        let line_height: f32 = (font_size * CONFIG.font.line_height_factor).round();
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         buffer.set_size(
             &mut font_system,
@@ -132,9 +137,8 @@ impl Renderer {
             return;
         }
         self.scale = scale;
-        let font_size_pt = 14.0_f32;
-        self.font_size = (font_size_pt * scale).round();
-        self.line_height = (self.font_size * 1.3_f32).round();
+        self.font_size = (CONFIG.font.size_pt * scale).round();
+        self.line_height = (self.font_size * CONFIG.font.line_height_factor).round();
         self.buffer
             .set_metrics(&mut self.font_system, Metrics::new(self.font_size, self.line_height));
         self.preedit_buffer
@@ -172,7 +176,7 @@ impl Renderer {
             }
         }
 
-        let attrs = Attrs::new().family(Family::Monospace);
+        let attrs = font_attrs();
         self.buffer
             .set_text(&mut self.font_system, &text, &attrs, Shaping::Advanced, None);
         self.buffer
@@ -221,7 +225,7 @@ impl Renderer {
             top: 0.0,
             scale: 1.0,
             bounds,
-            default_color: Color::rgb(0xd0, 0xd0, 0xd0),
+            default_color: rgb_to_color(DEFAULT_FG),
             custom_glyphs: &[],
         });
         if has_preedit {
@@ -231,7 +235,7 @@ impl Renderer {
                 top: pre_top,
                 scale: 1.0,
                 bounds,
-                default_color: Color::rgb(0xff, 0xe0, 0x70),
+                default_color: rgb_to_color(PREEDIT_COLOR),
                 custom_glyphs: &[],
             });
         }
@@ -289,16 +293,15 @@ impl Renderer {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
 
-            let stroke = (2.0 * self.scale).round().max(1.0);
+            let stroke = (CURSOR_STROKE_PT * self.scale).round().max(1.0);
             let overlay: Vec<Rect> = if has_preedit {
-                // Underline marking the IME composing region.
                 let w = preedit_w.max(self.cell_width);
                 vec![Rect {
                     x: pre_left,
                     y: pre_top + self.line_height - stroke,
                     w,
                     h: stroke,
-                    color: [1.0, 0.88, 0.44, 1.0],
+                    color: PREEDIT_UNDERLINE_RGBA,
                 }]
             } else {
                 build_cursor_outline(
@@ -331,7 +334,7 @@ fn measure_cell_width(fs: &mut FontSystem, font_size: f32, line_height: f32) -> 
     const PROBE: &str = "MMMMMMMMMM";
     let mut buf = Buffer::new(fs, Metrics::new(font_size, line_height));
     buf.set_size(fs, Some(10_000.0), Some(line_height * 2.0));
-    let attrs = Attrs::new().family(Family::Monospace);
+    let attrs = font_attrs();
     buf.set_text(fs, PROBE, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(fs, false);
     let mut max_x: f32 = 0.0;
@@ -348,13 +351,24 @@ fn measure_cell_width(fs: &mut FontSystem, font_size: f32, line_height: f32) -> 
 }
 
 fn build_cursor_outline(x: f32, y: f32, w: f32, h: f32, t: f32) -> [Rect; 4] {
-    const COLOR: [f32; 4] = [0.90, 0.78, 0.20, 1.0]; // amber/yellow
+    let c = CURSOR_COLOR_RGBA;
     [
-        Rect { x, y, w, h: t, color: COLOR },                       // top
-        Rect { x, y: y + h - t, w, h: t, color: COLOR },            // bottom
-        Rect { x, y, w: t, h, color: COLOR },                       // left
-        Rect { x: x + w - t, y, w: t, h, color: COLOR },            // right
+        Rect { x, y, w, h: t, color: c },
+        Rect { x, y: y + h - t, w, h: t, color: c },
+        Rect { x, y, w: t, h, color: c },
+        Rect { x: x + w - t, y, w: t, h, color: c },
     ]
+}
+
+fn rgb_to_color(c: Rgb) -> Color {
+    Color::rgb(c.0, c.1, c.2)
+}
+
+fn font_attrs() -> Attrs<'static> {
+    match CONFIG.font.family.as_deref() {
+        Some(name) => Attrs::new().family(Family::Name(name)),
+        None => Attrs::new().family(Family::Monospace),
+    }
 }
 
 fn srgb_to_linear(c: u8) -> f64 {

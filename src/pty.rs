@@ -3,6 +3,10 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
+use crate::config::CONFIG;
+
+const TERM_ENV: &str = "xterm-256color";
+
 pub struct Pty {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -22,12 +26,11 @@ impl Pty {
             pixel_height: 0,
         })?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        let mut cmd = CommandBuilder::new(shell);
+        let mut cmd = CommandBuilder::new(CONFIG.resolved_shell());
         if let Ok(home) = std::env::var("HOME") {
             cmd.cwd(home);
         }
-        cmd.env("TERM", "xterm-256color");
+        cmd.env("TERM", TERM_ENV);
 
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
