@@ -53,7 +53,7 @@ const CURVATURE:       f32 = 2.0;  // newpixie default
 // Pixelation: snap source-sample UV to a coarse logical-pixel grid so
 // glyphs read as chunky CRT pixels. Size in physical pixels — 1.0 off,
 // 2-3 typical.
-const PIXEL_SIZE:      f32 = 2.5;
+const PIXEL_SIZE:      f32 = 2.0;
 // 3-pixel shadow mask, matching the original `1 - 0.23 * mod(x,3)/2`.
 const MASK_STRENGTH:   f32 = 0.23;
 // Per-channel chromatic offset in *physical pixels*. The slang uses
