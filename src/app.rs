@@ -4,7 +4,7 @@ use anyhow::Result;
 use vte::Parser;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
-use winit::event::{Ime, KeyEvent, Modifiers, WindowEvent};
+use winit::event::{Ime, KeyEvent, Modifiers, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Icon, Window, WindowAttributes, WindowId};
 
@@ -46,6 +46,9 @@ struct App {
     pty: Option<Pty>,
     modifiers: Modifiers,
     preedit: String,
+    /// Sub-line wheel delta accumulator — trackpads send fractional lines
+    /// per event, and dropping the fraction would freeze slow scrolls.
+    scroll_accum: f32,
 }
 
 impl App {
@@ -59,6 +62,7 @@ impl App {
             pty: None,
             modifiers: Modifiers::default(),
             preedit: String::new(),
+            scroll_accum: 0.0,
         }
     }
 
@@ -113,7 +117,7 @@ impl App {
         self.request_redraw();
     }
 
-    fn on_keyboard_input(&self, event: KeyEvent, is_synthetic: bool) {
+    fn on_keyboard_input(&mut self, event: KeyEvent, is_synthetic: bool) {
         if is_synthetic {
             return;
         }
@@ -123,8 +127,70 @@ impl App {
             return;
         }
         if let Some(bytes) = encode_key(&event, &self.modifiers) {
+            // Snap the scrollback view back to the live bottom on user
+            // input — matches every other terminal: typing pulls you
+            // out of history.
+            if self.term.view_offset != 0 {
+                self.term.reset_view();
+                self.request_redraw();
+            }
             if let Some(p) = &self.pty {
                 p.write(&bytes);
+            }
+        }
+    }
+
+    fn on_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        // Convert the wheel delta into integer line steps. winit hands us
+        // either logical lines (LineDelta) or pixels (PixelDelta, common
+        // on macOS trackpads); for pixels we divide by line height.
+        let lines: f32 = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(p) => {
+                let lh = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.line_height as f64)
+                    .unwrap_or(16.0);
+                if lh > 0.0 {
+                    (p.y / lh) as f32
+                } else {
+                    0.0
+                }
+            }
+        };
+        // Accumulate sub-line trackpad scrolls so a slow drag still moves.
+        self.scroll_accum += lines;
+        let step = self.scroll_accum.trunc() as i32;
+        if step == 0 {
+            return;
+        }
+        self.scroll_accum -= step as f32;
+
+        if self.term.is_alt_screen() {
+            // Alt-screen apps (less, helix, vim) usually don't enable mouse
+            // reporting. Synthesize cursor up/down keys — the xterm
+            // "alternateScroll" convention — so j/k-style navigation gets
+            // driven by the wheel without us implementing full mouse
+            // reporting yet.
+            let (byte, count) = if step > 0 {
+                (b'A', step as usize)
+            } else {
+                (b'B', (-step) as usize)
+            };
+            let mut bytes = Vec::with_capacity(count * 3);
+            for _ in 0..count {
+                bytes.extend_from_slice(&[0x1b, b'[', byte]);
+            }
+            if let Some(p) = &self.pty {
+                p.write(&bytes);
+            }
+        } else {
+            // Main screen → walk the scrollback view. Wheel up (+y) means
+            // older content, which is +offset in our model.
+            self.term.scroll_view(step);
+            if self.term.dirty {
+                self.request_redraw();
             }
         }
     }
@@ -255,6 +321,7 @@ impl ApplicationHandler<UserEvent> for App {
                 is_synthetic,
                 ..
             } => self.on_keyboard_input(event, is_synthetic),
+            WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
             WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::RedrawRequested => self.on_redraw(),
             _ => {}

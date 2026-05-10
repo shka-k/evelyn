@@ -164,7 +164,10 @@ impl Renderer {
     }
 
     pub fn render(&mut self, term: &Term, preedit: &str) -> Result<()> {
-        let show_cursor = preedit.is_empty() && term.cursor_visible;
+        // Hide the cursor while the user is browsing scrollback — the
+        // (cur_x, cur_y) position refers to the live screen and would
+        // paint at the wrong row inside the historical view.
+        let show_cursor = preedit.is_empty() && term.cursor_visible && term.view_offset == 0;
         let cursor_wide = if show_cursor {
             cursor_cell(term).map(|(_, w)| w).unwrap_or(false)
         } else {
@@ -416,12 +419,11 @@ impl Renderer {
         let cols = term.cols as usize;
         let mut quads = Vec::new();
         for y in 0..term.rows {
-            let row_start = (y as usize) * cols;
             let mut x: usize = 0;
             while x < cols {
-                let bg = term.cells[row_start + x].bg_eff();
+                let bg = term.cell_at(x as u16, y).bg_eff();
                 let mut end = x + 1;
-                while end < cols && term.cells[row_start + end].bg_eff() == bg {
+                while end < cols && term.cell_at(end as u16, y).bg_eff() == bg {
                     end += 1;
                 }
                 if bg != screen_bg {
@@ -474,8 +476,7 @@ fn build_runs(
         let mut run_text = String::new();
 
         for x in 0..term.cols {
-            let i = (y as usize) * (term.cols as usize) + (x as usize);
-            let cell = &term.cells[i];
+            let cell = term.cell_at(x, y);
             if cell.ch == '\0' {
                 continue; // wide-char continuation
             }

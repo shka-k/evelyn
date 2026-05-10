@@ -1,7 +1,13 @@
 mod parser;
 
+use std::collections::VecDeque;
+
 use crate::color::{default_bg, default_fg, Rgb};
 use crate::width::is_wide;
+
+/// Max scrollback rows kept in history. Each row is `cols * sizeof(Cell)`,
+/// so 5000 * ~256 cols * ~24B ≈ 30MB worst case — fine.
+const HISTORY_CAP: usize = 5000;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Cell {
@@ -82,6 +88,13 @@ pub struct Term {
     /// Snapshot of the main screen kept while we're in alt screen
     /// (`\\e[?1049h`). On exit (`\\e[?1049l`) we restore it.
     saved: Option<SavedScreen>,
+    /// Scrollback buffer — rows that have rolled off the top of the main
+    /// screen. Each entry is exactly `cols` cells wide; `cols` mismatches
+    /// (window resize) clear the buffer rather than reflowing.
+    history: VecDeque<Vec<Cell>>,
+    /// Lines the viewport is shifted up from the live bottom, in [0, history.len()].
+    /// 0 means we're showing the live screen.
+    pub view_offset: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -125,6 +138,53 @@ impl Term {
             scroll_bot: rows.saturating_sub(1),
             saved_cursor: None,
             saved: None,
+            history: VecDeque::new(),
+            view_offset: 0,
+        }
+    }
+
+    pub fn is_alt_screen(&self) -> bool {
+        self.saved.is_some()
+    }
+
+    /// Cell at screen position `(x, y)` accounting for the scrollback view.
+    /// When `view_offset > 0` the top of the screen is sourced from history.
+    pub fn cell_at(&self, x: u16, y: u16) -> &Cell {
+        let cols = self.cols as usize;
+        let x = x as usize;
+        let y = y as usize;
+        let h = self.history.len();
+        let view_top = h.saturating_sub(self.view_offset);
+        let global_y = view_top + y;
+        if global_y < h {
+            &self.history[global_y][x]
+        } else {
+            let local_y = global_y - h;
+            &self.cells[local_y * cols + x]
+        }
+    }
+
+    /// Adjust the scrollback view. Positive = scroll back (older content),
+    /// negative = scroll forward toward the live bottom. Clamped to the
+    /// history length. No-op while in alt screen — apps own that surface
+    /// and we don't have history rows there.
+    pub fn scroll_view(&mut self, delta_lines: i32) {
+        if self.is_alt_screen() {
+            return;
+        }
+        let cur = self.view_offset as i64;
+        let new = (cur + delta_lines as i64).max(0).min(self.history.len() as i64);
+        let new = new as usize;
+        if new != self.view_offset {
+            self.view_offset = new;
+            self.dirty = true;
+        }
+    }
+
+    pub fn reset_view(&mut self) {
+        if self.view_offset != 0 {
+            self.view_offset = 0;
+            self.dirty = true;
         }
     }
 
@@ -155,6 +215,9 @@ impl Term {
         self.scroll_bot = self.rows.saturating_sub(1);
         self.saved_cursor = None;
         self.pending_wrap = false;
+        // Snap any active scrollback view back to the live bottom — alt
+        // screen owns its own surface and history is meaningless there.
+        self.view_offset = 0;
         self.dirty = true;
     }
 
@@ -189,6 +252,12 @@ impl Term {
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        // History rows have a fixed cols width — drop them on a width
+        // change rather than reflowing. Height changes leave history alone.
+        if cols != self.cols {
+            self.history.clear();
+            self.view_offset = 0;
+        }
         self.cols = cols;
         self.rows = rows;
         self.cells = vec![Cell::default(); (cols as usize) * (rows as usize)];
@@ -299,6 +368,29 @@ impl Term {
         let band_start = top * cols;
         let band_end = (bot + 1) * cols;
         let shift = n * cols;
+
+        // Full-screen scroll on the main screen → the displaced top rows
+        // become scrollback history. Region scrolls (zellij panes, CSI L /
+        // CSI M from a non-zero cursor row) and alt-screen scrolls don't
+        // contribute to history.
+        let full_screen = top == 0 && bot + 1 == self.rows as usize;
+        if full_screen && self.saved.is_none() {
+            for row in 0..n {
+                let row_start = band_start + row * cols;
+                let row_cells = self.cells[row_start..row_start + cols].to_vec();
+                if self.history.len() == HISTORY_CAP {
+                    self.history.pop_front();
+                } else if self.view_offset > 0 {
+                    // Anchor the scrollback view to the same content as
+                    // new lines push in. Only bump while we still have
+                    // headroom; once history hits the cap, the oldest
+                    // row drops and the view naturally drifts forward.
+                    self.view_offset += 1;
+                }
+                self.history.push_back(row_cells);
+            }
+        }
+
         if shift < band_end - band_start {
             self.cells
                 .copy_within(band_start + shift..band_end, band_start);
