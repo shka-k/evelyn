@@ -18,6 +18,10 @@
 // startup; the corner fade lerps toward this so the vignette settles
 // into the configured theme bg rather than pure black.
 @group(0) @binding(2) var<uniform> theme_bg: vec4<f32>;
+// Previous frame's CRT output, for phosphor persistence. The Rust side
+// ping-pongs between two textures so the slot we read here is never
+// the slot we write to in this pass.
+@group(0) @binding(3) var history_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -75,6 +79,17 @@ const VIG_GAIN:  f32 = 1.30;
 // uses +0.02 per channel, but in our linear-space pipeline that gets
 // gamma-expanded to a visible gray. Keep it tiny.
 const AMBIENT:   f32 = 0.005;
+// Phosphor persistence (afterglow). Two independent knobs:
+//   DECAY   — per-frame multiplier on the stored trail. Controls *how
+//             long* afterglow lingers. Half-life ≈ -log(2)/log(decay):
+//             0.25 → 0.50f, 0.35 → 0.66f, 0.50 → 1.0f, 0.65 → 1.6f.
+//   STRENGTH — how much of the decayed trail is mixed into the visible
+//             image. Controls *how bright* the afterglow looks. The
+//             stored history is unaffected by this — only the surface
+//             output is dimmed, so the trail still fades on the same
+//             schedule but reads as a softer ghost. 0.0 disables.
+const PHOSPHOR_DECAY:    f32 = 0.25;
+const PHOSPHOR_STRENGTH: f32 = 0.4;
 
 // Original newpixie barrel curvature. Per-axis stretch, then a
 // quadratic widening proportional to the orthogonal coordinate, then
@@ -142,8 +157,16 @@ fn rolloff(c: vec3<f32>) -> vec3<f32> {
     return c / (1.0 + max(c - vec3<f32>(1.0), vec3<f32>(0.0)));
 }
 
+struct FsOut {
+    // Surface — what the user sees this frame.
+    @location(0) surface: vec4<f32>,
+    // History — same value, fed back next frame as `history_tex` so the
+    // afterglow can decay over time. Both attachments share format.
+    @location(1) history: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> FsOut {
     let dim = vec2<f32>(textureDimensions(src_tex, 0));
 
     // Original's blend of curve and identity, then a ~10% expand so
@@ -200,5 +223,24 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let mask_phase = clamp((in.clip.x - floor(in.clip.x / 3.0) * 3.0) / 2.0, 0.0, 1.0);
     col *= 1.0 - MASK_STRENGTH * mask_phase;
 
-    return vec4<f32>(rolloff(col), 1.0);
+    let final_col = rolloff(col);
+
+    // Phosphor persistence. Sample the previous frame at the same screen
+    // position (pre-curve uv — the history is post-CRT, already curved)
+    // and max-blend with the decayed previous value. Max keeps the
+    // current frame fully bright while letting prior bright pixels
+    // linger as a trail.
+    //
+    // The *stored* history uses the full decayed trail so the fade
+    // schedule is independent of how visible we make it; the *surface*
+    // output mixes between the live frame and that trail by STRENGTH,
+    // so a lower STRENGTH dims the ghost without making it shorter.
+    let prev = textureSample(history_tex, src_sampler, in.uv).rgb;
+    let trail = max(final_col, prev * PHOSPHOR_DECAY);
+    let visible = mix(final_col, trail, PHOSPHOR_STRENGTH);
+
+    var out: FsOut;
+    out.surface = vec4<f32>(visible, 1.0);
+    out.history = vec4<f32>(trail, 1.0);
+    return out;
 }

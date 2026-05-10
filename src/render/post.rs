@@ -1,17 +1,19 @@
 //! Post-processing: render the cell grid to an offscreen texture, then run
-//! a full-screen shader (CRT effect) into the surface.
+//! a full-screen shader (CRT effect) into the surface. The CRT pass also
+//! writes a copy of its output into a ping-pong "history" texture so the
+//! next frame can sample it as phosphor afterglow.
 
 use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
     BlendState, Buffer, BufferBindingType, BufferUsages, ColorTargetState, ColorWrites,
-    CommandEncoder, Device, Extent3d, FilterMode, FragmentState, LoadOp, MipmapFilterMode,
-    MultisampleState, Operations, PipelineLayoutDescriptor, PrimitiveState,
-    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
-    Sampler, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor, ShaderSource,
-    ShaderStages, StoreOp, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
-    VertexState,
+    CommandEncoder, CommandEncoderDescriptor, Device, Extent3d, FilterMode, FragmentState,
+    LoadOp, MipmapFilterMode, MultisampleState, Operations, PipelineLayoutDescriptor,
+    PrimitiveState, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
+    ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Texture, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
+    TextureViewDescriptor, TextureViewDimension, VertexState,
 };
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
@@ -22,12 +24,21 @@ pub struct PostProcessor {
     /// post-pass samples it.
     texture: Texture,
     view: TextureView,
+    /// Ping-pong history textures for phosphor persistence. Each frame the
+    /// CRT pass reads `history[history_idx]` (the previous frame's CRT
+    /// output) and writes the current frame into the other slot via MRT.
+    /// Then `history_idx` flips so next frame reads what we just wrote.
+    history: [Texture; 2],
+    history_views: [TextureView; 2],
+    history_idx: usize,
     sampler: Sampler,
     /// Uniform buffer holding the theme background as a linear-space
     /// vec4 — shaders can lerp toward it for the corner fade.
     uniforms: Buffer,
     bind_group_layout: BindGroupLayout,
-    bind_group: BindGroup,
+    /// One bind group per ping-pong direction. Index `i` binds
+    /// `history[i]` as the "previous" sample source.
+    bind_groups: [BindGroup; 2],
     pipeline: RenderPipeline,
     width: u32,
     height: u32,
@@ -37,12 +48,19 @@ pub struct PostProcessor {
 impl PostProcessor {
     pub fn new(
         device: &Device,
+        queue: &Queue,
         format: TextureFormat,
         width: u32,
         height: u32,
         wgsl: &str,
     ) -> Self {
-        let (texture, view) = create_offscreen(device, format, width, height);
+        let (texture, view) = create_offscreen(device, format, width, height, "post-offscreen");
+        let (h0_tex, h0_view) = create_offscreen(device, format, width, height, "post-history-0");
+        let (h1_tex, h1_view) = create_offscreen(device, format, width, height, "post-history-1");
+        clear_history(device, queue, &h0_view, &h1_view);
+        let history = [h0_tex, h1_tex];
+        let history_views = [h0_view, h1_view];
+
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("post-sampler"),
             address_mode_u: AddressMode::ClampToEdge,
@@ -83,6 +101,16 @@ impl PostProcessor {
                     },
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         // Theme bg in linear space, padded to vec4. Written once at startup
@@ -92,7 +120,24 @@ impl PostProcessor {
             contents: bytemuck::cast_slice(&[theme_bg_linear_vec4(default_bg())]),
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         });
-        let bind_group = make_bind_group(device, &bind_group_layout, &view, &sampler, &uniforms);
+        let bind_groups = [
+            make_bind_group(
+                device,
+                &bind_group_layout,
+                &view,
+                &sampler,
+                &uniforms,
+                &history_views[0],
+            ),
+            make_bind_group(
+                device,
+                &bind_group_layout,
+                &view,
+                &sampler,
+                &uniforms,
+                &history_views[1],
+            ),
+        ];
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("post-shader"),
@@ -119,11 +164,21 @@ impl PostProcessor {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(ColorTargetState {
-                    format,
-                    blend: Some(BlendState::REPLACE),
-                    write_mask: ColorWrites::ALL,
-                })],
+                // Two color targets: surface and the new history slot.
+                // Both share `format` so the same fragment value can be
+                // emitted at @location(0) and @location(1).
+                targets: &[
+                    Some(ColorTargetState {
+                        format,
+                        blend: Some(BlendState::REPLACE),
+                        write_mask: ColorWrites::ALL,
+                    }),
+                    Some(ColorTargetState {
+                        format,
+                        blend: Some(BlendState::REPLACE),
+                        write_mask: ColorWrites::ALL,
+                    }),
+                ],
             }),
             multiview_mask: None,
             cache: None,
@@ -132,10 +187,13 @@ impl PostProcessor {
         Self {
             texture,
             view,
+            history,
+            history_views,
+            history_idx: 0,
             sampler,
             uniforms,
             bind_group_layout,
-            bind_group,
+            bind_groups,
             pipeline,
             width,
             height,
@@ -143,20 +201,40 @@ impl PostProcessor {
         }
     }
 
-    pub fn resize(&mut self, device: &Device, width: u32, height: u32) {
+    pub fn resize(&mut self, device: &Device, queue: &Queue, width: u32, height: u32) {
         if width == self.width && height == self.height {
             return;
         }
-        let (texture, view) = create_offscreen(device, self.format, width, height);
+        let (texture, view) = create_offscreen(device, self.format, width, height, "post-offscreen");
         self.texture = texture;
         self.view = view;
-        self.bind_group = make_bind_group(
-            device,
-            &self.bind_group_layout,
-            &self.view,
-            &self.sampler,
-            &self.uniforms,
-        );
+
+        let h0 = create_offscreen(device, self.format, width, height, "post-history-0");
+        let h1 = create_offscreen(device, self.format, width, height, "post-history-1");
+        clear_history(device, queue, &h0.1, &h1.1);
+        self.history = [h0.0, h1.0];
+        self.history_views = [h0.1, h1.1];
+        // Reset the ping-pong cursor — the old history is gone.
+        self.history_idx = 0;
+
+        self.bind_groups = [
+            make_bind_group(
+                device,
+                &self.bind_group_layout,
+                &self.view,
+                &self.sampler,
+                &self.uniforms,
+                &self.history_views[0],
+            ),
+            make_bind_group(
+                device,
+                &self.bind_group_layout,
+                &self.view,
+                &self.sampler,
+                &self.uniforms,
+                &self.history_views[1],
+            ),
+        ];
         self.width = width;
         self.height = height;
     }
@@ -166,28 +244,47 @@ impl PostProcessor {
     }
 
     /// Run the post-pass: sample the offscreen texture and write to
-    /// `surface_view` through the CRT shader.
-    pub fn apply(&self, encoder: &mut CommandEncoder, surface_view: &TextureView) {
-        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-            label: Some("post-pass"),
-            color_attachments: &[Some(RenderPassColorAttachment {
-                view: surface_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: Operations {
-                    load: LoadOp::Clear(wgpu::Color::BLACK),
-                    store: StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        // Three-vertex full-screen triangle; the vertex shader hard-codes positions.
-        pass.draw(0..3, 0..1);
+    /// `surface_view` through the CRT shader, while also stamping the
+    /// result into the next history slot for the following frame.
+    pub fn apply(&mut self, encoder: &mut CommandEncoder, surface_view: &TextureView) {
+        let prev = self.history_idx;
+        let curr = 1 - prev;
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("post-pass"),
+                color_attachments: &[
+                    Some(RenderPassColorAttachment {
+                        view: surface_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Clear(wgpu::Color::BLACK),
+                            store: StoreOp::Store,
+                        },
+                    }),
+                    Some(RenderPassColorAttachment {
+                        view: &self.history_views[curr],
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: Operations {
+                            // The shader overwrites every pixel, so any
+                            // load is fine; clear is the cheapest hint.
+                            load: LoadOp::Clear(wgpu::Color::BLACK),
+                            store: StoreOp::Store,
+                        },
+                    }),
+                ],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_groups[prev], &[]);
+            // Three-vertex full-screen triangle; the vertex shader hard-codes positions.
+            pass.draw(0..3, 0..1);
+        }
+        self.history_idx = curr;
     }
 }
 
@@ -196,9 +293,10 @@ fn create_offscreen(
     format: TextureFormat,
     width: u32,
     height: u32,
+    label: &str,
 ) -> (Texture, TextureView) {
     let texture = device.create_texture(&TextureDescriptor {
-        label: Some("post-offscreen"),
+        label: Some(label),
         size: Extent3d {
             width: width.max(1),
             height: height.max(1),
@@ -215,12 +313,41 @@ fn create_offscreen(
     (texture, view)
 }
 
+/// Zero out both history textures with a no-op render pass. wgpu does
+/// not guarantee initial texture contents, so without this the first
+/// frame would sample garbage and bleed it into the phosphor trail.
+fn clear_history(device: &Device, queue: &Queue, view0: &TextureView, view1: &TextureView) {
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("post-history-clear"),
+    });
+    for v in [view0, view1] {
+        encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("post-history-clear-pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: v,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Clear(wgpu::Color::BLACK),
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+    }
+    queue.submit(Some(encoder.finish()));
+}
+
 fn make_bind_group(
     device: &Device,
     layout: &BindGroupLayout,
     view: &TextureView,
     sampler: &Sampler,
     uniforms: &Buffer,
+    history_view: &TextureView,
 ) -> BindGroup {
     device.create_bind_group(&BindGroupDescriptor {
         label: Some("post-bg"),
@@ -237,6 +364,10 @@ fn make_bind_group(
             BindGroupEntry {
                 binding: 2,
                 resource: uniforms.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: BindingResource::TextureView(history_view),
             },
         ],
     })

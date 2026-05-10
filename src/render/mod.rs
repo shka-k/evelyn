@@ -81,7 +81,7 @@ impl Renderer {
         } = init_text_stack(&device, &queue, format);
         let quads = QuadPipeline::new(&device, format);
         let post = resolve_shader_source().map(|src| {
-            PostProcessor::new(&device, format, config.width, config.height, &src)
+            PostProcessor::new(&device, &queue, format, config.width, config.height, &src)
         });
 
         let scale = window.scale_factor() as f32;
@@ -172,6 +172,7 @@ impl Renderer {
         self.post = resolve_shader_source().map(|src| {
             PostProcessor::new(
                 &self.device,
+                &self.queue,
                 self.config.format,
                 self.config.width,
                 self.config.height,
@@ -192,7 +193,7 @@ impl Renderer {
         self.config.height = h.max(1);
         self.surface.configure(&self.device, &self.config);
         if let Some(post) = self.post.as_mut() {
-            post.resize(&self.device, self.config.width, self.config.height);
+            post.resize(&self.device, &self.queue, self.config.width, self.config.height);
         }
     }
 
@@ -353,7 +354,7 @@ impl Renderer {
                 .render(&self.atlas, &self.viewport, &mut pass)?;
         }
 
-        if let Some(post) = self.post.as_ref() {
+        if let Some(post) = self.post.as_mut() {
             post.apply(&mut encoder, &surface_view);
         }
 
