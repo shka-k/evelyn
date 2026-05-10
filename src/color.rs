@@ -3,6 +3,40 @@ use crate::config::theme;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
+/// SGR color slot stored unresolved in cells. Keeping `Default` and
+/// `Indexed` symbolic — instead of baking them through the theme at parse
+/// time — is what makes hot-reload visually update zellij/vim and any
+/// other already-painted content: the renderer re-resolves through the
+/// live theme on every frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Color {
+    /// SGR 39/49 or post-reset state — picks up the live theme's fg/bg.
+    Default,
+    /// SGR 30-37/40-47 (n in 0..=7), 90-97/100-107 (n in 8..=15), and the
+    /// extended 256-color palette (n in 16..=255). Resolved via [`ansi_256`].
+    Indexed(u8),
+    /// SGR 38;2;r;g;b / 48;2;r;g;b — already absolute, never re-themed.
+    Rgb(Rgb),
+}
+
+impl Color {
+    pub fn resolve_fg(self) -> Rgb {
+        match self {
+            Color::Default => default_fg(),
+            Color::Indexed(n) => ansi_256(n),
+            Color::Rgb(c) => c,
+        }
+    }
+
+    pub fn resolve_bg(self) -> Rgb {
+        match self {
+            Color::Default => default_bg(),
+            Color::Indexed(n) => ansi_256(n),
+            Color::Rgb(c) => c,
+        }
+    }
+}
+
 pub fn default_fg() -> Rgb {
     theme().foreground
 }

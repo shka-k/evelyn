@@ -2,7 +2,7 @@ mod parser;
 
 use std::collections::VecDeque;
 
-use crate::color::{default_bg, default_fg, Rgb};
+use crate::color::{Color, Rgb};
 use crate::width::is_wide;
 
 /// Max scrollback rows kept in history. Each row is `cols * sizeof(Cell)`,
@@ -13,8 +13,8 @@ const HISTORY_CAP: usize = 5000;
 pub struct Cell {
     /// `'\0'` marks the right half of a wide character (continuation).
     pub ch: char,
-    pub fg: Rgb,
-    pub bg: Rgb,
+    pub fg: Color,
+    pub bg: Color,
     pub bold: bool,
     /// `\\e[7m` reverse video. Renderers swap fg/bg on output — this is
     /// how TUIs like yazi paint selection highlights without setting an
@@ -26,14 +26,23 @@ pub struct Cell {
 }
 
 impl Cell {
-    /// Effective foreground / background after reverse-video is applied.
-    /// The renderer should use these for actual drawing, never `fg`/`bg`
-    /// directly, otherwise reverse cells lose their highlight.
+    /// Effective foreground / background after reverse-video is applied,
+    /// resolved against the live theme. The renderer should use these for
+    /// actual drawing, never `fg`/`bg` directly, otherwise reverse cells
+    /// lose their highlight and `Color::Default` skips the theme.
     pub fn fg_eff(&self) -> Rgb {
-        if self.reverse { self.bg } else { self.fg }
+        if self.reverse {
+            self.bg.resolve_bg()
+        } else {
+            self.fg.resolve_fg()
+        }
     }
     pub fn bg_eff(&self) -> Rgb {
-        if self.reverse { self.fg } else { self.bg }
+        if self.reverse {
+            self.fg.resolve_fg()
+        } else {
+            self.bg.resolve_bg()
+        }
     }
 }
 
@@ -41,8 +50,8 @@ impl Default for Cell {
     fn default() -> Self {
         Self {
             ch: ' ',
-            fg: default_fg(),
-            bg: default_bg(),
+            fg: Color::Default,
+            bg: Color::Default,
             bold: false,
             reverse: false,
             wide: false,
@@ -56,8 +65,8 @@ pub struct Term {
     pub cells: Vec<Cell>,
     pub cur_x: u16,
     pub cur_y: u16,
-    pub fg: Rgb,
-    pub bg: Rgb,
+    pub fg: Color,
+    pub bg: Color,
     pub bold: bool,
     pub reverse: bool,
     pub dirty: bool,
@@ -106,8 +115,8 @@ pub struct Term {
 struct SavedCursor {
     cur_x: u16,
     cur_y: u16,
-    fg: Rgb,
-    bg: Rgb,
+    fg: Color,
+    bg: Color,
     bold: bool,
     reverse: bool,
 }
@@ -116,8 +125,8 @@ struct SavedScreen {
     cells: Vec<Cell>,
     cur_x: u16,
     cur_y: u16,
-    fg: Rgb,
-    bg: Rgb,
+    fg: Color,
+    bg: Color,
     bold: bool,
     reverse: bool,
 }
@@ -130,8 +139,8 @@ impl Term {
             cells: vec![Cell::default(); (cols as usize) * (rows as usize)],
             cur_x: 0,
             cur_y: 0,
-            fg: default_fg(),
-            bg: default_bg(),
+            fg: Color::Default,
+            bg: Color::Default,
             bold: false,
             reverse: false,
             dirty: true,
@@ -283,8 +292,8 @@ impl Term {
     }
 
     fn reset_attrs(&mut self) {
-        self.fg = default_fg();
-        self.bg = default_bg();
+        self.fg = Color::Default;
+        self.bg = Color::Default;
         self.bold = false;
         self.reverse = false;
     }

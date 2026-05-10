@@ -1,6 +1,6 @@
 use vte::{Params, Perform};
 
-use crate::color::{ansi_256, ansi_basic, cursor_color, default_bg, default_fg, Rgb};
+use crate::color::{cursor_color, default_bg, default_fg, Color, Rgb};
 
 use super::Term;
 
@@ -248,18 +248,18 @@ fn sgr(term: &mut Term, params: &Params) {
             7 => term.reverse = true,
             22 => term.bold = false,
             27 => term.reverse = false,
-            30..=37 => term.fg = ansi_basic((p - 30) as u8, false),
-            90..=97 => term.fg = ansi_basic((p - 90) as u8, true),
-            40..=47 => term.bg = ansi_basic((p - 40) as u8, false),
-            100..=107 => term.bg = ansi_basic((p - 100) as u8, true),
-            39 => term.fg = default_fg(),
-            49 => term.bg = default_bg(),
+            30..=37 => term.fg = Color::Indexed((p - 30) as u8),
+            90..=97 => term.fg = Color::Indexed(8 + (p - 90) as u8),
+            40..=47 => term.bg = Color::Indexed((p - 40) as u8),
+            100..=107 => term.bg = Color::Indexed(8 + (p - 100) as u8),
+            39 => term.fg = Color::Default,
+            49 => term.bg = Color::Default,
             38 | 48 => {
                 // 38;5;n  or 38;2;r;g;b
                 if let Some(&kind) = flat.get(i + 1) {
                     if kind == 5 {
                         if let Some(&n) = flat.get(i + 2) {
-                            let c = ansi_256(n as u8);
+                            let c = Color::Indexed(n as u8);
                             if p == 38 { term.fg = c; } else { term.bg = c; }
                             i += 2;
                         }
@@ -267,7 +267,7 @@ fn sgr(term: &mut Term, params: &Params) {
                         if let (Some(&r), Some(&g), Some(&b)) =
                             (flat.get(i + 2), flat.get(i + 3), flat.get(i + 4))
                         {
-                            let c = Rgb(r as u8, g as u8, b as u8);
+                            let c = Color::Rgb(Rgb(r as u8, g as u8, b as u8));
                             if p == 38 { term.fg = c; } else { term.bg = c; }
                             i += 4;
                         }
