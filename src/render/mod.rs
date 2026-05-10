@@ -365,10 +365,15 @@ impl Renderer {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            // Per-cell SGR backgrounds first, then the cursor block on top,
-            // then text. The cursor cell's char run uses cursor_text as its
-            // foreground so it appears inverted against the cursor block.
+            // Per-cell SGR backgrounds first, then the selection tint on
+            // top of those, then the cursor block, then text. The cursor
+            // cell's char run uses cursor_text as its foreground so it
+            // appears inverted against the cursor block. Selection sits
+            // between bg and cursor so an active drag still shows the
+            // cursor block, and is alpha-blended so colored cell bgs
+            // remain readable underneath.
             let mut quads = self.build_bg_quads(term, screen_bg);
+            quads.extend_from_slice(&self.build_selection_quads(term));
             quads.extend_from_slice(&overlay);
             self.quads.draw(
                 &self.device,
@@ -504,6 +509,40 @@ impl Renderer {
             },
         };
         vec![rect]
+    }
+
+    /// One alpha-blended rect per maximal run of selected cells in each
+    /// row. Rendered on top of the SGR backgrounds so colored cells still
+    /// show their hue under the highlight. Skipped entirely when nothing
+    /// is selected so the common path stays free of per-cell checks.
+    fn build_selection_quads(&self, term: &Term) -> Vec<Rect> {
+        if term.selection.is_none() {
+            return Vec::new();
+        }
+        let color = selection_overlay_color();
+        let mut quads = Vec::new();
+        for y in 0..term.rows {
+            let mut x: u16 = 0;
+            while x < term.cols {
+                if !term.cell_in_selection(x, y) {
+                    x += 1;
+                    continue;
+                }
+                let mut end = x + 1;
+                while end < term.cols && term.cell_in_selection(end, y) {
+                    end += 1;
+                }
+                quads.push(Rect {
+                    x: x as f32 * self.cell_width + self.padding,
+                    y: y as f32 * self.line_height + self.padding,
+                    w: (end - x) as f32 * self.cell_width,
+                    h: self.line_height,
+                    color,
+                });
+                x = end;
+            }
+        }
+        quads
     }
 
     /// One opaque rect per maximal stretch of cells that share an SGR
@@ -787,6 +826,21 @@ fn ligatures_off() -> FontFeatures {
     f.disable(FeatureTag::CONTEXTUAL_ALTERNATES);
     f.disable(FeatureTag::DISCRETIONARY_LIGATURES);
     f
+}
+
+/// Highlight color for the mouse selection overlay. Uses the cursor color
+/// (which is already chosen to stand out against the background) at
+/// reduced alpha so glyphs remain readable through it. Pre-linearised here
+/// because the surface format is sRGB and the quad pipeline outputs its
+/// fragment color as if it were linear.
+fn selection_overlay_color() -> [f32; 4] {
+    let cur = cursor_color();
+    [
+        srgb_to_linear(cur.0) as f32,
+        srgb_to_linear(cur.1) as f32,
+        srgb_to_linear(cur.2) as f32,
+        0.35,
+    ]
 }
 
 fn srgb_to_linear(c: u8) -> f64 {

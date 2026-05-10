@@ -7,7 +7,9 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use vte::Parser;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
-use winit::event::{Ime, KeyEvent, Modifiers, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, Ime, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::Key;
 use winit::window::{Icon, Window, WindowAttributes, WindowId};
@@ -16,7 +18,7 @@ use crate::config::{self, config};
 use crate::input::encode_key;
 use crate::pty::Pty;
 use crate::render::Renderer;
-use crate::term::{MouseProto, Term};
+use crate::term::{MouseProto, SelectionMode, Term};
 
 const WINDOW_TITLE: &str = "evelyn";
 /// PNG bytes for the window icon — same source the macOS .app bundle's
@@ -75,7 +77,30 @@ struct App {
     /// the next flip relative to this so the half-period is stable
     /// regardless of how often other events fire.
     cursor_blink_last_toggle: Instant,
+    /// Left mouse button is currently held — drives drag-to-extend on
+    /// `CursorMoved`. Released by either MouseInput::Released or window
+    /// focus loss. (CursorLeft alone doesn't release: a drag past the
+    /// edge keeps the button down.)
+    mouse_left_held: bool,
+    /// Last left-click for double / triple-click detection. Same global
+    /// cell within the timeout escalates Char → Word → Line; anywhere
+    /// else, or after the timeout, resets to a fresh single click.
+    last_click: Option<ClickRecord>,
 }
+
+#[derive(Clone, Copy)]
+struct ClickRecord {
+    line: usize,
+    col: u16,
+    at: Instant,
+    /// 1 = single (char), 2 = double (word), 3 = triple (line). Caps at 3.
+    count: u8,
+}
+
+/// Same-cell repeat window for promoting click count. Matches macOS Finder /
+/// most terminals — long enough that a deliberate double-click registers,
+/// short enough that two unrelated clicks at the same spot don't merge.
+const MULTI_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
 
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
@@ -94,6 +119,8 @@ impl App {
             last_reload: None,
             cursor_blink_on: true,
             cursor_blink_last_toggle: Instant::now(),
+            mouse_left_held: false,
+            last_click: None,
         }
     }
 
@@ -165,10 +192,120 @@ impl App {
                 self.term.reset_view();
                 self.request_redraw();
             }
+            // Typing past a selection makes the highlight stale (the user
+            // is editing the next prompt, not interacting with the picked
+            // range). Clear it so the redraw reflects the new state.
+            if self.term.selection.is_some() {
+                self.term.clear_selection();
+                self.request_redraw();
+            }
             self.poke_cursor_blink();
             if let Some(p) = &self.pty {
                 p.write(&bytes);
             }
+        }
+    }
+
+    /// Resolve the current cursor pixel position to a global (line, col).
+    /// Returns None when the cursor isn't tracked or the renderer isn't up
+    /// — callers in those states should bail rather than guess a position.
+    fn cursor_to_global(&self, pos: PhysicalPosition<f64>) -> Option<(usize, u16)> {
+        let r = self.renderer.as_ref()?;
+        let (col1, row1) = r.pixel_to_cell(pos.x, pos.y);
+        // pixel_to_cell uses xterm's 1-based convention — convert to the
+        // 0-based screen coords the term grid expects.
+        let col = col1.saturating_sub(1);
+        let row = row1.saturating_sub(1);
+        let line = self.term.screen_to_global_line(row);
+        Some((line, col))
+    }
+
+    fn on_mouse_input(&mut self, state: ElementState, button: MouseButton) {
+        if button != MouseButton::Left {
+            return;
+        }
+        let Some(pos) = self.cursor_pos else { return };
+        let Some((line, col)) = self.cursor_to_global(pos) else { return };
+
+        // Note: when an app has mouse tracking on (zellij's DECSET 1002),
+        // xterm convention is to suppress native selection unless Shift is
+        // held. We deliberately don't apply that gate here because we
+        // don't currently forward press / release reports — gating would
+        // mean the click does nothing at all. Once click forwarding lands
+        // we should re-introduce the Shift override (and suppress selection
+        // by default) so the foreground app gets its mouse back.
+
+        match state {
+            ElementState::Pressed => {
+                let now = Instant::now();
+                let count = match self.last_click {
+                    Some(prev)
+                        if prev.line == line
+                            && prev.col == col
+                            && now.duration_since(prev.at) <= MULTI_CLICK_TIMEOUT =>
+                    {
+                        // Cap at 3 so a 4th click cycles back to single.
+                        if prev.count >= 3 { 1 } else { prev.count + 1 }
+                    }
+                    _ => 1,
+                };
+                self.last_click = Some(ClickRecord { line, col, at: now, count });
+                let mode = match count {
+                    2 => SelectionMode::Word,
+                    3 => SelectionMode::Line,
+                    _ => SelectionMode::Char,
+                };
+                self.term.start_selection(line, col, mode);
+                self.mouse_left_held = true;
+                self.request_redraw();
+            }
+            ElementState::Released => {
+                self.mouse_left_held = false;
+                // A drag that produced any text → clipboard. A bare click
+                // (anchor == head) is a deselect signal: clear so the
+                // highlight goes away.
+                if let Some(sel) = self.term.selection {
+                    if sel.anchor_line == sel.head_line
+                        && sel.anchor_col == sel.head_col
+                        && sel.mode == SelectionMode::Char
+                    {
+                        self.term.clear_selection();
+                        self.request_redraw();
+                        return;
+                    }
+                }
+                if let Some(text) = self.term.extract_selection_text() {
+                    self.copy_to_clipboard(&text);
+                }
+            }
+        }
+    }
+
+    fn on_mouse_drag(&mut self, position: PhysicalPosition<f64>) {
+        if !self.mouse_left_held {
+            return;
+        }
+        let Some((line, col)) = self.cursor_to_global(position) else { return };
+        self.term.update_selection(line, col);
+        if self.term.dirty {
+            self.request_redraw();
+        }
+    }
+
+    /// Write `text` to the system clipboard. Errors are logged and dropped
+    /// — copy is a fire-and-forget UX action and we don't want a clipboard
+    /// hiccup to crash the terminal mid-session.
+    fn copy_to_clipboard(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match arboard::Clipboard::new() {
+            Ok(mut c) => {
+                if let Err(e) = c.set_text(text.to_string()) {
+                    eprintln!("[evelyn] clipboard write failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("[evelyn] clipboard open failed: {e}"),
         }
     }
 
@@ -558,11 +695,26 @@ impl ApplicationHandler<UserEvent> for App {
                         self.paste_from_clipboard();
                         return;
                     }
+                    if s.eq_ignore_ascii_case("c") {
+                        // Cmd+C with a selection copies. Without a
+                        // selection we swallow the keypress rather than
+                        // forwarding it as ESC+c, which is what the alt
+                        // fold of super_key would otherwise produce —
+                        // there is no useful "Cmd+C → PTY" mapping.
+                        if let Some(text) = self.term.extract_selection_text() {
+                            self.copy_to_clipboard(&text);
+                        }
+                        return;
+                    }
                 }
                 self.on_keyboard_input(event, is_synthetic);
             }
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
-            WindowEvent::CursorMoved { position, .. } => self.cursor_pos = Some(position),
+            WindowEvent::MouseInput { state, button, .. } => self.on_mouse_input(state, button),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = Some(position);
+                self.on_mouse_drag(position);
+            }
             WindowEvent::CursorLeft { .. } => self.cursor_pos = None,
             WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::RedrawRequested => self.on_redraw(),
