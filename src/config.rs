@@ -18,6 +18,7 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(load_or_default);
 pub struct Config {
     pub font: FontConfig,
     pub window: WindowConfig,
+    pub shader: ShaderConfig,
 
     /// Theme file name (without `.toml`) under `~/.config/evelyn/themes/`.
     /// The file must use the Alacritty `[colors.*]` schema, so you can
@@ -27,6 +28,43 @@ pub struct Config {
 
     /// Override the shell to spawn. `None` uses `$SHELL`, then `/bin/bash`.
     pub shell: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShaderConfig {
+    /// Master switch. When `false` the post-processing pass is skipped
+    /// entirely regardless of `effect`.
+    pub enabled: bool,
+    /// Post-processing effect applied after the cell grid is rasterized.
+    pub effect: ShaderEffect,
+}
+
+impl ShaderConfig {
+    /// Effect actually in use (`enabled = false` → `None`).
+    pub fn active(&self) -> ShaderEffect {
+        if self.enabled {
+            self.effect
+        } else {
+            ShaderEffect::None
+        }
+    }
+}
+
+impl Default for ShaderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            effect: ShaderEffect::NewpixieCrt,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ShaderEffect {
+    None,
+    NewpixieCrt,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,4 +1,5 @@
 mod init;
+mod post;
 mod quad;
 
 use std::sync::Arc;
@@ -17,13 +18,14 @@ use wgpu::{
 use winit::window::Window;
 
 use crate::color::{cursor_color, cursor_text_color, default_bg, default_fg, Rgb};
-use crate::config::CONFIG;
+use crate::config::{ShaderEffect, CONFIG};
 use crate::term::Term;
 
 use init::{
     init_gpu, init_text_stack, make_buffer, measure_cell_width, metrics_for, GpuInit, TextInit,
     BUNDLED_FONT_NAME,
 };
+use post::PostProcessor;
 use quad::{QuadPipeline, Rect};
 
 const PREEDIT_COLOR: Rgb = Rgb(0xff, 0xe0, 0x70);
@@ -47,6 +49,7 @@ pub struct Renderer {
     row_buffers: Vec<Buffer>,
     preedit_buffer: Buffer,
     quads: QuadPipeline,
+    post: Option<PostProcessor>,
     scale: f32,
     pub font_size: f32,
     pub line_height: f32,
@@ -76,6 +79,15 @@ impl Renderer {
             text_renderer,
         } = init_text_stack(&device, &queue, format);
         let quads = QuadPipeline::new(&device, format);
+        let post = match CONFIG.shader.active() {
+            ShaderEffect::None => None,
+            ShaderEffect::NewpixieCrt => Some(PostProcessor::new(
+                &device,
+                format,
+                config.width,
+                config.height,
+            )),
+        };
 
         let scale = window.scale_factor() as f32;
         let (font_size, line_height) = metrics_for(scale);
@@ -113,6 +125,7 @@ impl Renderer {
             row_buffers,
             preedit_buffer,
             quads,
+            post,
             scale,
             font_size,
             line_height,
@@ -142,6 +155,9 @@ impl Renderer {
         self.config.width = w.max(1);
         self.config.height = h.max(1);
         self.surface.configure(&self.device, &self.config);
+        if let Some(post) = self.post.as_mut() {
+            post.resize(&self.device, self.config.width, self.config.height);
+        }
     }
 
     pub fn grid_size(&self) -> (u16, u16) {
@@ -242,20 +258,27 @@ impl Renderer {
         )?;
 
         let Some(frame) = self.acquire_frame() else { return Ok(()); };
-        let view = frame
+        let surface_view = frame
             .texture
             .create_view(&TextureViewDescriptor::default());
         let overlay =
             self.overlay_quads(term, has_preedit, preedit_w, show_cursor, cursor_wide, pre_left, pre_top);
+
+        // Either render the cell grid directly to the surface, or to an
+        // offscreen texture that the post-pass will sample.
+        let cell_target: &wgpu::TextureView = match self.post.as_ref() {
+            Some(p) => p.offscreen_view(),
+            None => &surface_view,
+        };
 
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor { label: None });
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("evelyn-pass"),
+                label: Some("evelyn-cells"),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &view,
+                    view: cell_target,
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
@@ -284,6 +307,11 @@ impl Renderer {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
         }
+
+        if let Some(post) = self.post.as_ref() {
+            post.apply(&mut encoder, &surface_view);
+        }
+
         self.queue.submit(Some(encoder.finish()));
         self.window.pre_present_notify();
         frame.present();
