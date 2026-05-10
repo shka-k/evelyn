@@ -266,6 +266,14 @@ impl Renderer {
             None => &surface_view,
         };
 
+        // Screen-wide background: alt-screen apps like helix paint the
+        // whole grid with a non-default bg, but the padding around the
+        // grid only sees the surface clear. If we clear with theme bg,
+        // the rectangular cell-grid edge becomes visible against the
+        // padding — and curve()/vignette in the post pass turn that
+        // edge into a hard rectangle in the corners. Use cell (0,0)'s
+        // bg as a proxy for the dominant screen bg so padding matches.
+        let screen_bg = term.cells.first().map(|c| c.bg).unwrap_or_else(default_bg);
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor { label: None });
@@ -277,7 +285,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(clear_color_for(default_bg())),
+                        load: LoadOp::Clear(clear_color_for(screen_bg)),
                         store: StoreOp::Store,
                     },
                 })],
@@ -289,7 +297,7 @@ impl Renderer {
             // Per-cell SGR backgrounds first, then the cursor block on top,
             // then text. The cursor cell's char run uses cursor_text as its
             // foreground so it appears inverted against the cursor block.
-            let mut quads = self.build_bg_quads(term);
+            let mut quads = self.build_bg_quads(term, screen_bg);
             quads.extend_from_slice(&overlay);
             self.quads.draw(
                 &self.device,
@@ -401,11 +409,12 @@ impl Renderer {
         }]
     }
 
-    /// One opaque rect per maximal stretch of cells that share a non-default
-    /// SGR background within a row. Cells whose bg equals the theme
-    /// background are skipped — the surface clear already covers them.
-    fn build_bg_quads(&self, term: &Term) -> Vec<Rect> {
-        let bg_default = default_bg();
+    /// One opaque rect per maximal stretch of cells that share an SGR
+    /// background different from `screen_bg`. Cells whose bg matches
+    /// `screen_bg` are skipped because the surface clear already paints
+    /// them — and `screen_bg` is whatever we cleared the cell pass with,
+    /// not necessarily the theme default.
+    fn build_bg_quads(&self, term: &Term, screen_bg: Rgb) -> Vec<Rect> {
         let cols = term.cols as usize;
         let mut quads = Vec::new();
         for y in 0..term.rows {
@@ -417,7 +426,7 @@ impl Renderer {
                 while end < cols && term.cells[row_start + end].bg == bg {
                     end += 1;
                 }
-                if bg != bg_default {
+                if bg != screen_bg {
                     quads.push(Rect {
                         x: x as f32 * self.cell_width + self.padding,
                         y: y as f32 * self.line_height + self.padding,
