@@ -80,12 +80,14 @@ const VIG_GAIN:  f32 = 1.55;
 // stay dark even at the center. CENTER_LIFT adds a flat amount on top,
 // so the whole middle of the screen reads as gently emissive — closer
 // to the ambient phosphor glow of a real CRT.
-const CENTER_LIFT: f32 = 0.04;
+const CENTER_LIFT: f32 = 0.05;
 // Shape of the vignette mix. The slang shader uses sqrt (≈0.5) which
 // keeps the corners pretty lit; raising the exponent pulls the falloff
 // inward so the four-corner gradient toward theme_bg reads more clearly
 // without darkening the body. 1.0 ≈ linear; >1.0 sharpens further.
-const VIG_FALLOFF: f32 = 0.85;
+// Lower → dark zone shrinks toward the screen corners, more of the
+// curved body stays lit.
+const VIG_FALLOFF: f32 = 0.4;
 // Ambient phosphor lift on the inside of the curved screen — the slang
 // uses +0.02 per channel, but in our linear-space pipeline that gets
 // gamma-expanded to a visible gray. Keep it tiny.
@@ -184,7 +186,7 @@ fn fs_main(in: VsOut) -> FsOut {
     // content fills slightly past the curved boundary, plus a tiny
     // alignment nudge — the same recipe the slang shader uses.
     let curved_uv = mix(curve(in.uv), in.uv, 0.4);
-    let scale = -0.101;
+    let scale = -0.1;
     let scuv = curved_uv * (1.0 - scale)
         + vec2<f32>(scale * 0.5)
         + vec2<f32>(0.003, -0.001);
