@@ -1,8 +1,8 @@
 mod app;
+mod color;
 mod config;
 mod input;
 mod pty;
-mod quad;
 mod render;
 mod term;
 

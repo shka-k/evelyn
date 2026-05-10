@@ -4,7 +4,7 @@ use anyhow::Result;
 use vte::Parser;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
-use winit::event::{Ime, Modifiers, WindowEvent};
+use winit::event::{Ime, KeyEvent, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -57,6 +57,25 @@ impl App {
         }
     }
 
+    fn request_redraw(&self) {
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Re-read the renderer's grid size and propagate to Term + PTY when it
+    /// changed. Called from both Resized and ScaleFactorChanged.
+    fn sync_grid(&mut self) {
+        let Some(r) = self.renderer.as_ref() else { return };
+        let (cols, rows) = r.grid_size();
+        if cols != self.term.cols || rows != self.term.rows {
+            self.term.resize(cols, rows);
+            if let Some(p) = &self.pty {
+                p.resize(cols, rows);
+            }
+        }
+    }
+
     fn update_ime_cursor_area(&self) {
         let (Some(w), Some(r)) = (self.window.as_ref(), self.renderer.as_ref()) else {
             return;
@@ -70,6 +89,81 @@ impl App {
             LogicalPosition::new(x, y),
             LogicalSize::new(cell_w * IME_CANDIDATE_WIDTH_CELLS, cell_h),
         );
+    }
+
+    fn on_resized(&mut self, w: u32, h: u32) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.resize(w, h);
+            self.sync_grid();
+            self.request_redraw();
+        }
+    }
+
+    fn on_scale_factor_changed(&mut self, scale: f64) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_scale(scale as f32);
+            self.sync_grid();
+        }
+        self.request_redraw();
+    }
+
+    fn on_keyboard_input(&self, event: KeyEvent, is_synthetic: bool) {
+        if is_synthetic {
+            return;
+        }
+        // While IME is composing, suppress key→PTY translation; the IME
+        // delivers the result via Ime::Commit.
+        if !self.preedit.is_empty() {
+            return;
+        }
+        if let Some(bytes) = encode_key(&event, &self.modifiers) {
+            if let Some(p) = &self.pty {
+                p.write(&bytes);
+            }
+        }
+    }
+
+    fn on_ime(&mut self, ime: Ime) {
+        match ime {
+            Ime::Enabled | Ime::Disabled => {
+                self.preedit.clear();
+            }
+            Ime::Preedit(text, _cursor) => {
+                self.preedit = text;
+                self.update_ime_cursor_area();
+            }
+            Ime::Commit(text) => {
+                self.preedit.clear();
+                if !text.is_empty() {
+                    if let Some(p) = &self.pty {
+                        p.write(text.as_bytes());
+                    }
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    fn on_redraw(&mut self) {
+        if let Some(r) = self.renderer.as_mut() {
+            if let Err(e) = r.render(&self.term, &self.preedit) {
+                eprintln!("render error: {e}");
+            }
+            self.term.dirty = false;
+        }
+    }
+
+    fn on_pty_data(&mut self, bytes: Vec<u8>) {
+        self.parser.advance(&mut self.term, &bytes);
+        if !self.term.replies.is_empty() {
+            let reply = std::mem::take(&mut self.term.replies);
+            if let Some(p) = &self.pty {
+                p.write(&reply);
+            }
+        }
+        if self.term.dirty {
+            self.request_redraw();
+        }
     }
 }
 
@@ -128,20 +222,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::PtyData(bytes) => {
-                self.parser.advance(&mut self.term, &bytes);
-                if !self.term.replies.is_empty() {
-                    let reply = std::mem::take(&mut self.term.replies);
-                    if let Some(p) = &self.pty {
-                        p.write(&reply);
-                    }
-                }
-                if self.term.dirty {
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
+            UserEvent::PtyData(bytes) => self.on_pty_data(bytes),
         }
     }
 
@@ -153,90 +234,20 @@ impl ApplicationHandler<UserEvent> for App {
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
-                if let Some(r) = self.renderer.as_mut() {
-                    r.resize(size.width, size.height);
-                    let (cols, rows) = r.grid_size();
-                    if cols != self.term.cols || rows != self.term.rows {
-                        self.term.resize(cols, rows);
-                        if let Some(p) = &self.pty {
-                            p.resize(cols, rows);
-                        }
-                    }
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
+            WindowEvent::Resized(size) => self.on_resized(size.width, size.height),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let Some(r) = self.renderer.as_mut() {
-                    r.set_scale(scale_factor as f32);
-                    let (cols, rows) = r.grid_size();
-                    if cols != self.term.cols || rows != self.term.rows {
-                        self.term.resize(cols, rows);
-                        if let Some(p) = &self.pty {
-                            p.resize(cols, rows);
-                        }
-                    }
-                }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                self.on_scale_factor_changed(scale_factor);
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m;
             }
             WindowEvent::KeyboardInput {
-                event, is_synthetic, ..
-            } => {
-                if is_synthetic {
-                    return;
-                }
-                // While IME is composing, suppress key→PTY translation; the IME
-                // will deliver the result via Ime::Commit.
-                if !self.preedit.is_empty() {
-                    return;
-                }
-                if let Some(bytes) = encode_key(&event, &self.modifiers) {
-                    if let Some(p) = &self.pty {
-                        p.write(&bytes);
-                    }
-                }
-            }
-            WindowEvent::Ime(ime) => match ime {
-                Ime::Enabled | Ime::Disabled => {
-                    self.preedit.clear();
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-                Ime::Preedit(text, _cursor) => {
-                    self.preedit = text;
-                    self.update_ime_cursor_area();
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-                Ime::Commit(text) => {
-                    self.preedit.clear();
-                    if !text.is_empty() {
-                        if let Some(p) = &self.pty {
-                            p.write(text.as_bytes());
-                        }
-                    }
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            },
-            WindowEvent::RedrawRequested => {
-                if let Some(r) = self.renderer.as_mut() {
-                    if let Err(e) = r.render(&self.term, &self.preedit) {
-                        eprintln!("render error: {e}");
-                    }
-                    self.term.dirty = false;
-                }
-            }
+                event,
+                is_synthetic,
+                ..
+            } => self.on_keyboard_input(event, is_synthetic),
+            WindowEvent::Ime(ime) => self.on_ime(ime),
+            WindowEvent::RedrawRequested => self.on_redraw(),
             _ => {}
         }
     }
