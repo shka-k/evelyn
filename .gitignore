@@ -1,1 +1,8 @@
-/target
+# cargo build output, anywhere in the tree (covers any future sub-crates).
+target/
+
+# macOS .app bundle / .icns / .dmg output from `make app` / `make dmg`.
+/build
+
+# macOS Finder metadata.
+.DS_Store

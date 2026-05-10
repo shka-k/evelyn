@@ -6,7 +6,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{Ime, KeyEvent, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{Icon, Window, WindowAttributes, WindowId};
 
 use crate::config::CONFIG;
 use crate::input::encode_key;
@@ -15,6 +15,10 @@ use crate::render::Renderer;
 use crate::term::Term;
 
 const WINDOW_TITLE: &str = "evelyn";
+/// PNG bytes for the window icon — same source the macOS .app bundle's
+/// .icns is generated from. Decoded on startup so launching via
+/// `cargo run` (no bundle) still picks up the right Dock icon.
+const WINDOW_ICON_PNG: &[u8] = include_bytes!("../assets/icons/evelyn.png");
 const INITIAL_WINDOW_SIZE_LOGICAL: (f64, f64) = (960.0, 600.0);
 const INITIAL_COLS: u16 = 80;
 const INITIAL_ROWS: u16 = 24;
@@ -174,12 +178,15 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = WindowAttributes::default()
+        let mut attrs = WindowAttributes::default()
             .with_title(WINDOW_TITLE)
             .with_inner_size(LogicalSize::new(
                 INITIAL_WINDOW_SIZE_LOGICAL.0,
                 INITIAL_WINDOW_SIZE_LOGICAL.1,
             ));
+        if let Some(icon) = decode_window_icon() {
+            attrs = attrs.with_window_icon(Some(icon));
+        }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -253,4 +260,23 @@ impl ApplicationHandler<UserEvent> for App {
             _ => {}
         }
     }
+}
+
+/// Decode the bundled PNG into RGBA and hand it to winit. Returns `None`
+/// on failure — the window just runs without a custom icon then.
+fn decode_window_icon() -> Option<Icon> {
+    let decoder = png::Decoder::new(WINDOW_ICON_PNG);
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let (w, h) = (info.width, info.height);
+    let rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
+        png::ColorType::Rgb => buf[..info.buffer_size()]
+            .chunks_exact(3)
+            .flat_map(|c| [c[0], c[1], c[2], 255])
+            .collect(),
+        _ => return None,
+    };
+    Icon::from_rgba(rgba, w, h).ok()
 }
