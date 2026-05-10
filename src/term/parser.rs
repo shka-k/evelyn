@@ -71,6 +71,14 @@ impl Perform for Term {
                     1 => self.app_cursor_keys = on,
                     7 => self.auto_wrap = on,
                     25 => self.cursor_visible = on,
+                    // Mouse tracking modes. Setting any one implies the
+                    // previous; resetting any clears tracking entirely
+                    // (xterm semantics — apps reset whichever mode they
+                    // set, and shouldn't end up with a stale level).
+                    1000 => self.mouse_proto = if on { super::MouseProto::Press } else { super::MouseProto::Off },
+                    1002 => self.mouse_proto = if on { super::MouseProto::Button } else { super::MouseProto::Off },
+                    1003 => self.mouse_proto = if on { super::MouseProto::Any } else { super::MouseProto::Off },
+                    1006 => self.mouse_sgr = on,
                     1047 | 1049 => {
                         if on {
                             self.enter_alt_screen();

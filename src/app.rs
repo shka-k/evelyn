@@ -6,7 +6,7 @@ use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use vte::Parser;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{Ime, KeyEvent, Modifiers, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::Key;
@@ -16,7 +16,7 @@ use crate::config::{self, config};
 use crate::input::encode_key;
 use crate::pty::Pty;
 use crate::render::Renderer;
-use crate::term::Term;
+use crate::term::{MouseProto, Term};
 
 const WINDOW_TITLE: &str = "evelyn";
 /// PNG bytes for the window icon — same source the macOS .app bundle's
@@ -58,6 +58,10 @@ struct App {
     /// Sub-line wheel delta accumulator — trackpads send fractional lines
     /// per event, and dropping the fraction would freeze slow scrolls.
     scroll_accum: f32,
+    /// Last seen cursor position in physical window pixels. Updated from
+    /// CursorMoved; used to attach a (col, row) to wheel events when the
+    /// app has mouse tracking on. None until the cursor enters the window.
+    cursor_pos: Option<PhysicalPosition<f64>>,
     /// Held to keep the file watcher alive — drop = unwatch. We don't
     /// interact with it after spawn; the callback owns the proxy clone.
     _config_watcher: Option<RecommendedWatcher>,
@@ -78,6 +82,7 @@ impl App {
             modifiers: Modifiers::default(),
             preedit: String::new(),
             scroll_accum: 0.0,
+            cursor_pos: None,
             _config_watcher: None,
             last_reload: None,
         }
@@ -184,16 +189,18 @@ impl App {
         }
         self.scroll_accum -= step as f32;
 
-        // "An interactive full-screen app is running" heuristic: alt-screen
-        // OR DECCKM (app cursor keys). Classic vi doesn't use alt-screen
-        // but does set DECCKM — without the second clause, wheeling in vi
-        // would drive scrollback instead of moving its cursor.
-        if self.term.is_alt_screen() || self.term.app_cursor_keys {
-            // Synthesize cursor up/down keys — the xterm "alternateScroll"
-            // convention — so j/k-style navigation gets driven by the
-            // wheel without us implementing full mouse reporting yet.
-            // Match DECCKM so vi/vim/helix actually pick up the keys
-            // (they bind the SS3 form when app_cursor_keys is on).
+        // Priority order for what to do with the wheel:
+        //   1. App requested mouse tracking (DECSET 1000/1002/1003) →
+        //      send wheel reports. zellij/tmux/helix-with-mouse all hit
+        //      this path; without it the wheel falls through to our
+        //      scrollback while the app expects to handle scrolling.
+        //   2. Alt screen or DECCKM (app cursor keys) → synthesize arrow
+        //      keys (xterm "alternateScroll" stopgap for apps that don't
+        //      enable mouse tracking but do want to consume the wheel).
+        //   3. Otherwise → walk our own scrollback.
+        if self.term.mouse_proto != MouseProto::Off {
+            self.send_wheel_report(step);
+        } else if self.term.is_alt_screen() || self.term.app_cursor_keys {
             let (byte, count) = if step > 0 {
                 (b'A', step as usize)
             } else {
@@ -215,6 +222,35 @@ impl App {
                 self.request_redraw();
             }
         }
+    }
+
+    /// Encode `step` wheel ticks as xterm mouse reports and write them to
+    /// the PTY. One report per tick (apps treat each as a discrete event;
+    /// merging would lose granularity for slow wheels). Up == button 64,
+    /// down == 65, both encoded as press-only (wheel has no release).
+    /// Uses SGR (1006) when the app requested it, X10 otherwise — clamped
+    /// to col/row 223 in X10 since the legacy form can't address beyond.
+    fn send_wheel_report(&self, step: i32) {
+        let Some(pty) = &self.pty else { return };
+        let (col, row) = self
+            .cursor_pos
+            .and_then(|p| self.renderer.as_ref().map(|r| r.pixel_to_cell(p.x, p.y)))
+            .unwrap_or((1, 1));
+        let button: u32 = if step > 0 { 64 } else { 65 };
+        let count = step.unsigned_abs() as usize;
+        let mut bytes = Vec::new();
+        for _ in 0..count {
+            if self.term.mouse_sgr {
+                use std::io::Write;
+                let _ = write!(&mut bytes, "\x1b[<{};{};{}M", button, col, row);
+            } else {
+                let cb = (32 + button).min(255) as u8;
+                let cx = (32 + col as u32).min(255) as u8;
+                let cy = (32 + row as u32).min(255) as u8;
+                bytes.extend_from_slice(&[0x1b, b'[', b'M', cb, cx, cy]);
+            }
+        }
+        pty.write(&bytes);
     }
 
     fn on_ime(&mut self, ime: Ime) {
@@ -450,6 +486,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.on_keyboard_input(event, is_synthetic);
             }
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
+            WindowEvent::CursorMoved { position, .. } => self.cursor_pos = Some(position),
+            WindowEvent::CursorLeft { .. } => self.cursor_pos = None,
             WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::RedrawRequested => self.on_redraw(),
             _ => {}

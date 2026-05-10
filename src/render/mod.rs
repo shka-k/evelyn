@@ -205,6 +205,20 @@ impl Renderer {
         (cols, rows)
     }
 
+    /// Convert a window-relative physical pixel position to a 1-indexed
+    /// (col, row) cell coord, matching xterm's mouse-report convention.
+    /// Clamped to the visible grid; positions in the padding bezel snap
+    /// to the nearest edge cell so wheel events at the window margin
+    /// still report a sensible position to the foreground app.
+    pub fn pixel_to_cell(&self, x: f64, y: f64) -> (u16, u16) {
+        let (cols, rows) = self.grid_size();
+        let local_x = (x as f32 - self.padding).max(0.0);
+        let local_y = (y as f32 - self.padding).max(0.0);
+        let cx = ((local_x / self.cell_width).floor() as i32).clamp(0, cols as i32 - 1) as u16;
+        let cy = ((local_y / self.line_height).floor() as i32).clamp(0, rows as i32 - 1) as u16;
+        (cx + 1, cy + 1)
+    }
+
     pub fn render(&mut self, term: &Term, preedit: &str) -> Result<()> {
         // Hide the cursor while the user is browsing scrollback — the
         // (cur_x, cur_y) position refers to the live screen and would

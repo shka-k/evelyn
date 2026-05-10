@@ -82,6 +82,18 @@ pub struct Term {
     /// all enable this on entry — without honoring it, arrow keys arrive
     /// as the wrong sequence and the app silently ignores them.
     pub app_cursor_keys: bool,
+    /// xterm mouse tracking mode set by the running app via DECSET 1000 /
+    /// 1002 / 1003. Anything other than `Off` means the app wants to
+    /// receive mouse events itself — wheel events in particular get
+    /// reported instead of driving our scrollback. Zellij turns this on
+    /// (typically `Button` + SGR encoding); without it our scroll handler
+    /// would walk scrollback while zellij is the foreground app.
+    pub mouse_proto: MouseProto,
+    /// DECSET 1006 — SGR-form mouse reporting. When on, reports use
+    /// `\\e[<b;x;yM/m` (decimal, terminator distinguishes press/release).
+    /// When off, the legacy X10 form `\\e[Mbxy` (one byte each, +32) is
+    /// used and gets capped at column/row 223. Modern TUIs request 1006.
+    pub mouse_sgr: bool,
     /// VT100 "last column" / deferred wrap. Set after a print lands in the
     /// rightmost column with DECAWM on; the wrap is held until the next
     /// print, and any cursor motion (CR/LF/BS/CUP/…) cancels it. Without
@@ -109,6 +121,21 @@ pub struct Term {
     /// Lines the viewport is shifted up from the live bottom, in [0, history.len()].
     /// 0 means we're showing the live screen.
     pub view_offset: usize,
+}
+
+/// xterm mouse tracking levels. Each level subsumes the previous, but for
+/// our purposes the only thing that matters is "off vs. anything" — the
+/// wheel-report path doesn't depend on which level is active.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MouseProto {
+    /// No mouse reporting requested.
+    Off,
+    /// DECSET 1000 — press / release only.
+    Press,
+    /// DECSET 1002 — press / release + drag while a button is held.
+    Button,
+    /// DECSET 1003 — every motion event.
+    Any,
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +174,8 @@ impl Term {
             cursor_visible: true,
             auto_wrap: true,
             app_cursor_keys: false,
+            mouse_proto: MouseProto::Off,
+            mouse_sgr: false,
             pending_wrap: false,
             replies: Vec::new(),
             scroll_top: 0,
