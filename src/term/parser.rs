@@ -1,6 +1,6 @@
 use vte::{Params, Perform};
 
-use crate::color::{ansi_256, ansi_basic, Rgb, DEFAULT_BG, DEFAULT_FG};
+use crate::color::{ansi_256, ansi_basic, cursor_color, default_bg, default_fg, Rgb};
 
 use super::Term;
 
@@ -20,7 +20,54 @@ impl Perform for Term {
         }
     }
 
+    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        let term_seq: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
+        let Some(num_bytes) = params.first() else { return };
+        let Ok(num_str) = std::str::from_utf8(num_bytes) else { return };
+        let Ok(base) = num_str.parse::<u32>() else { return };
+        if !(10..=12).contains(&base) {
+            return;
+        }
+        for (i, arg) in params[1..].iter().enumerate() {
+            let target = base + i as u32;
+            if *arg != b"?" || target > 12 {
+                break;
+            }
+            let c = match target {
+                10 => default_fg(),
+                11 => default_bg(),
+                12 => cursor_color(),
+                _ => break,
+            };
+            let resp = format!(
+                "\x1b]{target};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}",
+                c.0, c.0, c.1, c.1, c.2, c.2
+            );
+            self.replies.extend_from_slice(resp.as_bytes());
+            self.replies.extend_from_slice(term_seq);
+        }
+    }
+
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // DECSET / DECRST — `\e[?Nh / l`. Cover the modes we actually act on.
+        if intermediates == b"?" && (action == 'h' || action == 'l') {
+            let on = action == 'h';
+            for n in params.iter().flatten().copied() {
+                match n {
+                    25 => self.cursor_visible = on,
+                    1047 | 1049 => {
+                        if on {
+                            self.enter_alt_screen();
+                        } else {
+                            self.exit_alt_screen();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.dirty = true;
+            return;
+        }
         match action {
             'c' => self.dispatch_da(intermediates),
             'n' => self.dispatch_dsr(first_param(params, 0)),
@@ -127,8 +174,8 @@ fn sgr(term: &mut Term, params: &Params) {
             90..=97 => term.fg = ansi_basic((p - 90) as u8, true),
             40..=47 => term.bg = ansi_basic((p - 40) as u8, false),
             100..=107 => term.bg = ansi_basic((p - 100) as u8, true),
-            39 => term.fg = DEFAULT_FG,
-            49 => term.bg = DEFAULT_BG,
+            39 => term.fg = default_fg(),
+            49 => term.bg = default_bg(),
             38 | 48 => {
                 // 38;5;n  or 38;2;r;g;b
                 if let Some(&kind) = flat.get(i + 1) {

@@ -1,34 +1,43 @@
+use crate::config::RESOLVED_THEME;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
-pub const DEFAULT_FG: Rgb = Rgb(0xd0, 0xd0, 0xd0);
-pub const DEFAULT_BG: Rgb = Rgb(0x10, 0x10, 0x14);
+pub fn default_fg() -> Rgb {
+    RESOLVED_THEME.foreground
+}
 
-const BASE_PALETTE: [Rgb; 8] = [
-    Rgb(0x00, 0x00, 0x00),
-    Rgb(0xcd, 0x31, 0x31),
-    Rgb(0x0d, 0xbc, 0x79),
-    Rgb(0xe5, 0xe5, 0x10),
-    Rgb(0x24, 0x72, 0xc8),
-    Rgb(0xbc, 0x3f, 0xbc),
-    Rgb(0x11, 0xa8, 0xcd),
-    Rgb(0xe5, 0xe5, 0xe5),
-];
+pub fn default_bg() -> Rgb {
+    RESOLVED_THEME.background
+}
 
-const BRIGHT_PALETTE: [Rgb; 8] = [
-    Rgb(0x66, 0x66, 0x66),
-    Rgb(0xf1, 0x4c, 0x4c),
-    Rgb(0x23, 0xd1, 0x8b),
-    Rgb(0xf5, 0xf5, 0x43),
-    Rgb(0x3b, 0x8e, 0xea),
-    Rgb(0xd6, 0x70, 0xd6),
-    Rgb(0x29, 0xb8, 0xdb),
-    Rgb(0xff, 0xff, 0xff),
-];
+pub fn cursor_color() -> Rgb {
+    RESOLVED_THEME.cursor
+}
+
+pub fn cursor_text_color() -> Rgb {
+    RESOLVED_THEME.cursor_text
+}
 
 /// SGR 30-37 / 90-97 / 40-47 / 100-107.
 pub fn ansi_basic(n: u8, bright: bool) -> Rgb {
-    let table = if bright { &BRIGHT_PALETTE } else { &BASE_PALETTE };
+    let p = &RESOLVED_THEME.ansi;
+    let table = if bright {
+        [
+            p.bright_black,
+            p.bright_red,
+            p.bright_green,
+            p.bright_yellow,
+            p.bright_blue,
+            p.bright_magenta,
+            p.bright_cyan,
+            p.bright_white,
+        ]
+    } else {
+        [
+            p.black, p.red, p.green, p.yellow, p.blue, p.magenta, p.cyan, p.white,
+        ]
+    };
     table[(n & 7) as usize]
 }
 

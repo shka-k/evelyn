@@ -16,7 +16,7 @@ use wgpu::{
 };
 use winit::window::Window;
 
-use crate::color::{Rgb, DEFAULT_BG, DEFAULT_FG};
+use crate::color::{cursor_color, cursor_text_color, default_bg, default_fg, Rgb};
 use crate::config::CONFIG;
 use crate::term::Term;
 
@@ -26,9 +26,8 @@ use init::{
 };
 use quad::{QuadPipeline, Rect};
 
-const CURSOR_COLOR_RGBA: [f32; 4] = [0.90, 0.78, 0.20, 1.0];
 const PREEDIT_COLOR: Rgb = Rgb(0xff, 0xe0, 0x70);
-const PREEDIT_UNDERLINE_RGBA: [f32; 4] = [1.0, 0.88, 0.44, 1.0];
+const PREEDIT_UNDERLINE: Rgb = Rgb(0xff, 0xe0, 0x70);
 const PREEDIT_UNDERLINE_PT: f32 = 2.0;
 
 pub struct Renderer {
@@ -146,7 +145,7 @@ impl Renderer {
     }
 
     pub fn render(&mut self, term: &Term, preedit: &str) -> Result<()> {
-        let show_cursor = preedit.is_empty();
+        let show_cursor = preedit.is_empty() && term.cursor_visible;
         let cursor_wide = if show_cursor {
             cursor_cell(term).map(|(_, w)| w).unwrap_or(false)
         } else {
@@ -162,7 +161,7 @@ impl Renderer {
             Some((
                 term.cur_x,
                 term.cur_y,
-                base.clone().color(rgb_to_color(DEFAULT_BG)),
+                base.clone().color(rgb_to_color(cursor_text_color())),
             ))
         } else {
             None
@@ -207,7 +206,7 @@ impl Renderer {
                 top: run.row as f32 * line_height,
                 scale: 1.0,
                 bounds,
-                default_color: rgb_to_color(DEFAULT_FG),
+                default_color: rgb_to_color(default_fg()),
                 custom_glyphs: &[],
             })
             .collect();
@@ -237,7 +236,8 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&TextureViewDescriptor::default());
-        let overlay = self.overlay_quads(term, has_preedit, preedit_w, cursor_wide, pre_left, pre_top);
+        let overlay =
+            self.overlay_quads(term, has_preedit, preedit_w, show_cursor, cursor_wide, pre_left, pre_top);
 
         let mut encoder = self
             .device
@@ -250,7 +250,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(clear_color_for(DEFAULT_BG)),
+                        load: LoadOp::Clear(clear_color_for(default_bg())),
                         store: StoreOp::Store,
                     },
                 })],
@@ -259,16 +259,18 @@ impl Renderer {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            // Solid cursor block first, then text on top — the cursor cell's
-            // char run uses DEFAULT_BG as its foreground so it appears
-            // inverted against the amber block.
+            // Per-cell SGR backgrounds first, then the cursor block on top,
+            // then text. The cursor cell's char run uses cursor_text as its
+            // foreground so it appears inverted against the cursor block.
+            let mut quads = self.build_bg_quads(term);
+            quads.extend_from_slice(&overlay);
             self.quads.draw(
                 &self.device,
                 &self.queue,
                 &mut pass,
                 self.config.width as f32,
                 self.config.height as f32,
-                &overlay,
+                &quads,
             );
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
@@ -335,6 +337,7 @@ impl Renderer {
         term: &Term,
         has_preedit: bool,
         preedit_w: f32,
+        show_cursor: bool,
         cursor_wide: bool,
         pre_left: f32,
         pre_top: f32,
@@ -347,8 +350,11 @@ impl Renderer {
                 y: pre_top + self.line_height - underline_h,
                 w,
                 h: underline_h,
-                color: PREEDIT_UNDERLINE_RGBA,
+                color: rgb_to_rgba(PREEDIT_UNDERLINE, 1.0),
             }];
+        }
+        if !show_cursor {
+            return Vec::new();
         }
         let block_w = if cursor_wide {
             self.cell_width * 2.0
@@ -360,8 +366,39 @@ impl Renderer {
             y: term.cur_y as f32 * self.line_height,
             w: block_w,
             h: self.line_height,
-            color: CURSOR_COLOR_RGBA,
+            color: rgb_to_rgba(cursor_color(), 1.0),
         }]
+    }
+
+    /// One opaque rect per maximal stretch of cells that share a non-default
+    /// SGR background within a row. Cells whose bg equals the theme
+    /// background are skipped — the surface clear already covers them.
+    fn build_bg_quads(&self, term: &Term) -> Vec<Rect> {
+        let bg_default = default_bg();
+        let cols = term.cols as usize;
+        let mut quads = Vec::new();
+        for y in 0..term.rows {
+            let row_start = (y as usize) * cols;
+            let mut x: usize = 0;
+            while x < cols {
+                let bg = term.cells[row_start + x].bg;
+                let mut end = x + 1;
+                while end < cols && term.cells[row_start + end].bg == bg {
+                    end += 1;
+                }
+                if bg != bg_default {
+                    quads.push(Rect {
+                        x: x as f32 * self.cell_width,
+                        y: y as f32 * self.line_height,
+                        w: (end - x) as f32 * self.cell_width,
+                        h: self.line_height,
+                        color: rgb_to_rgba(bg, 1.0),
+                    });
+                }
+                x = end;
+            }
+        }
+        quads
     }
 
     /// Acquire the next surface texture, recovering transient surface losses.
@@ -395,7 +432,7 @@ fn build_runs(
 
     for y in 0..term.rows {
         let mut run_col: u16 = 0;
-        let mut run_attrs = attrs_for_cell(base.clone(), DEFAULT_FG, false);
+        let mut run_attrs = attrs_for_cell(base.clone(), default_fg(), false);
         let mut run_text = String::new();
 
         for x in 0..term.cols {
@@ -503,6 +540,19 @@ fn clear_color_for(bg: Rgb) -> wgpu::Color {
 
 fn rgb_to_color(c: Rgb) -> Color {
     Color::rgb(c.0, c.1, c.2)
+}
+
+/// Pre-linearise sRGB color values for the quad pipeline. The wgpu surface
+/// format is sRGB, so the fragment shader output is treated as linear and
+/// gamma-encoded on write. Without this conversion every solid quad would
+/// render visibly lighter than the source color.
+fn rgb_to_rgba(c: Rgb, a: f32) -> [f32; 4] {
+    [
+        srgb_to_linear(c.0) as f32,
+        srgb_to_linear(c.1) as f32,
+        srgb_to_linear(c.2) as f32,
+        a,
+    ]
 }
 
 fn font_attrs() -> Attrs<'static> {

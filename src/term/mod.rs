@@ -1,6 +1,6 @@
 mod parser;
 
-use crate::color::{Rgb, DEFAULT_BG, DEFAULT_FG};
+use crate::color::{default_bg, default_fg, Rgb};
 use crate::width::is_wide;
 
 #[derive(Clone, Copy, Debug)]
@@ -19,8 +19,8 @@ impl Default for Cell {
     fn default() -> Self {
         Self {
             ch: ' ',
-            fg: DEFAULT_FG,
-            bg: DEFAULT_BG,
+            fg: default_fg(),
+            bg: default_bg(),
             bold: false,
             wide: false,
         }
@@ -37,9 +37,24 @@ pub struct Term {
     pub bg: Rgb,
     pub bold: bool,
     pub dirty: bool,
+    /// `\\e[?25 h/l` — apps like helix or less hide the cursor while
+    /// rendering. The renderer skips the block when this is false.
+    pub cursor_visible: bool,
     /// Bytes the terminal needs to send back to the host program (DA, DSR, …).
     /// Drained by the application after each parser advance.
     pub replies: Vec<u8>,
+    /// Snapshot of the main screen kept while we're in alt screen
+    /// (`\\e[?1049h`). On exit (`\\e[?1049l`) we restore it.
+    saved: Option<SavedScreen>,
+}
+
+struct SavedScreen {
+    cells: Vec<Cell>,
+    cur_x: u16,
+    cur_y: u16,
+    fg: Rgb,
+    bg: Rgb,
+    bold: bool,
 }
 
 impl Term {
@@ -50,12 +65,60 @@ impl Term {
             cells: vec![Cell::default(); (cols as usize) * (rows as usize)],
             cur_x: 0,
             cur_y: 0,
-            fg: DEFAULT_FG,
-            bg: DEFAULT_BG,
+            fg: default_fg(),
+            bg: default_bg(),
             bold: false,
             dirty: true,
+            cursor_visible: true,
             replies: Vec::new(),
+            saved: None,
         }
+    }
+
+    /// Enter alt screen — apps like helix expect this to give them a clean
+    /// canvas and snap cursor to (0,0). We snapshot main so `\\e[?1049l`
+    /// can restore the shell prompt.
+    pub(super) fn enter_alt_screen(&mut self) {
+        if self.saved.is_none() {
+            self.saved = Some(SavedScreen {
+                cells: self.cells.clone(),
+                cur_x: self.cur_x,
+                cur_y: self.cur_y,
+                fg: self.fg,
+                bg: self.bg,
+                bold: self.bold,
+            });
+        }
+        let blank = self.blank_cell();
+        for cell in &mut self.cells {
+            *cell = blank;
+        }
+        self.cur_x = 0;
+        self.cur_y = 0;
+        self.dirty = true;
+    }
+
+    pub(super) fn exit_alt_screen(&mut self) {
+        let Some(s) = self.saved.take() else { return };
+        let needed = (self.cols as usize) * (self.rows as usize);
+        // Window may have been resized while we were in alt screen.
+        // If so, just clear; the shell will repaint when it gets focus back.
+        if s.cells.len() == needed {
+            self.cells = s.cells;
+            self.cur_x = s.cur_x.min(self.cols.saturating_sub(1));
+            self.cur_y = s.cur_y.min(self.rows.saturating_sub(1));
+            self.fg = s.fg;
+            self.bg = s.bg;
+            self.bold = s.bold;
+        } else {
+            let blank = self.blank_cell();
+            for cell in &mut self.cells {
+                *cell = blank;
+            }
+            self.cur_x = 0;
+            self.cur_y = 0;
+        }
+        self.dirty = true;
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -72,8 +135,8 @@ impl Term {
     }
 
     fn reset_attrs(&mut self) {
-        self.fg = DEFAULT_FG;
-        self.bg = DEFAULT_BG;
+        self.fg = default_fg();
+        self.bg = default_bg();
         self.bold = false;
     }
 
@@ -109,17 +172,32 @@ impl Term {
 
     fn line_feed(&mut self) {
         if self.cur_y + 1 >= self.rows {
-            // Scroll up by one line.
+            // Scroll up by one line. New bottom row inherits current SGR
+            // background so apps that paint a row of bg + LF get the bg
+            // applied to the freshly-revealed line.
             let cols = self.cols as usize;
             self.cells.copy_within(cols.., 0);
             let n = self.cells.len();
+            let blank = self.blank_cell();
             for cell in &mut self.cells[n - cols..] {
-                *cell = Cell::default();
+                *cell = blank;
             }
         } else {
             self.cur_y += 1;
         }
         self.dirty = true;
+    }
+
+    /// A blank cell carrying the current SGR attributes — what `\\e[K` and
+    /// `\\e[J` should leave behind so colored erase actually paints.
+    fn blank_cell(&self) -> Cell {
+        Cell {
+            ch: ' ',
+            fg: self.fg,
+            bg: self.bg,
+            bold: self.bold,
+            wide: false,
+        }
     }
 
     fn carriage_return(&mut self) {
@@ -149,8 +227,9 @@ impl Term {
             2 | 3 => (0, total),
             _ => return,
         };
+        let blank = self.blank_cell();
         for cell in &mut self.cells[start..end] {
-            *cell = Cell::default();
+            *cell = blank;
         }
         self.dirty = true;
     }
@@ -165,8 +244,9 @@ impl Term {
             2 => (row_start, row_end),
             _ => return,
         };
+        let blank = self.blank_cell();
         for cell in &mut self.cells[start..end] {
-            *cell = Cell::default();
+            *cell = blank;
         }
         self.dirty = true;
     }
