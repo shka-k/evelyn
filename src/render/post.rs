@@ -13,8 +13,6 @@ use wgpu::{
     TextureViewDescriptor, TextureViewDimension, VertexState,
 };
 
-const NEWPIXIE_CRT_WGSL: &str = include_str!("shaders/newpixie_crt.wgsl");
-
 pub struct PostProcessor {
     /// Offscreen color target. The cell grid renders into this; the
     /// post-pass samples it.
@@ -30,7 +28,13 @@ pub struct PostProcessor {
 }
 
 impl PostProcessor {
-    pub fn new(device: &Device, format: TextureFormat, width: u32, height: u32) -> Self {
+    pub fn new(
+        device: &Device,
+        format: TextureFormat,
+        width: u32,
+        height: u32,
+        wgsl: &str,
+    ) -> Self {
         let (texture, view) = create_offscreen(device, format, width, height);
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("post-sampler"),
@@ -68,7 +72,7 @@ impl PostProcessor {
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("post-shader"),
-            source: ShaderSource::Wgsl(NEWPIXIE_CRT_WGSL.into()),
+            source: ShaderSource::Wgsl(wgsl.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("post-pl-layout"),

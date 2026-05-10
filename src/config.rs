@@ -36,17 +36,18 @@ pub struct ShaderConfig {
     /// Master switch. When `false` the post-processing pass is skipped
     /// entirely regardless of `effect`.
     pub enabled: bool,
-    /// Post-processing effect applied after the cell grid is rasterized.
-    pub effect: ShaderEffect,
+    /// Built-in name (`"newpixie-crt"`, `"none"`) or a filename under
+    /// `~/.config/evelyn/shaders/` (with or without `.wgsl`). Built-ins
+    /// resolve in zero IO; user files are read at startup.
+    pub effect: String,
 }
 
 impl ShaderConfig {
-    /// Effect actually in use (`enabled = false` → `None`).
-    pub fn active(&self) -> ShaderEffect {
+    pub fn effect_name(&self) -> &str {
         if self.enabled {
-            self.effect
+            self.effect.as_str()
         } else {
-            ShaderEffect::None
+            "none"
         }
     }
 }
@@ -55,16 +56,9 @@ impl Default for ShaderConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            effect: ShaderEffect::NewpixieCrt,
+            effect: "newpixie-crt".into(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum ShaderEffect {
-    None,
-    NewpixieCrt,
 }
 
 #[derive(Debug, Deserialize)]

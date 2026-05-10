@@ -39,6 +39,11 @@ fn curve(uv: vec2<f32>) -> vec2<f32> {
     return uv + centered * dist.yx / curvature;
 }
 
+// Tunables that shape the CRT feel.
+const SCANLINE_PERIOD: f32 = 4.0; // physical rows per scanline cycle
+const MASK_STRIPE:    f32 = 6.0;  // phosphor stripe width in physical px
+const SCANLINE_DEPTH: f32 = 0.7; // dimmest point of a scanline (0..1)
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let warped = curve(in.uv);
@@ -48,21 +53,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
 
-    var color = textureSample(src_tex, src_sampler, warped).rgb;
-
     let dim = vec2<f32>(textureDimensions(src_tex, 0));
 
-    // Scanlines: every other physical row dimmed.
-    let line_phase = fract(warped.y * dim.y * 0.5);
-    let scan = mix(0.85, 1.0, smoothstep(0.0, 0.5, abs(line_phase - 0.5) * 2.0));
+    // Sharp sample — no UV quantization, so glyph edges stay smooth.
+    var color = textureSample(src_tex, src_sampler, warped).rgb;
+
+    // Thick scanlines spanning multiple physical rows.
+    let line_phase = fract(warped.y * dim.y / SCANLINE_PERIOD);
+    let scan = mix(SCANLINE_DEPTH, 1.0, smoothstep(0.0, 0.5, abs(line_phase - 0.5) * 2.0));
     color *= scan;
 
-    // RGB phosphor mask: stripe of slightly tinted columns.
-    let col = i32(floor(warped.x * dim.x)) % 3;
+    // RGB phosphor mask: subtle per-column tint. Keep amplitudes small so
+    // the dim columns don't show up as visible dark vertical bands.
+    let col = i32(floor(warped.x * dim.x / MASK_STRIPE)) % 3;
     var mask = vec3<f32>(1.0, 1.0, 1.0);
-    if (col == 0) { mask = vec3<f32>(1.05, 0.92, 0.92); }
-    else if (col == 1) { mask = vec3<f32>(0.92, 1.05, 0.92); }
-    else { mask = vec3<f32>(0.92, 0.92, 1.05); }
+    if (col == 0) { mask = vec3<f32>(1.04, 0.97, 0.97); }
+    else if (col == 1) { mask = vec3<f32>(0.97, 1.04, 0.97); }
+    else { mask = vec3<f32>(0.97, 0.97, 1.04); }
     color *= mask;
 
     // Vignette: dim the corners.
@@ -74,7 +81,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // remains visible on near-black cells. Kept achromatic so dark areas
     // don't pick up an unintended color cast; the per-column RGB mask still
     // produces the subtle striping.
-    let ambient = 0.012;
+    let ambient = 0.014;
     color += vec3<f32>(ambient) * mask * scan * v;
 
     // The offscreen texture is sRGB so `textureSample` returned linear values

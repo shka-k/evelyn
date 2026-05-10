@@ -17,8 +17,11 @@ use wgpu::{
 };
 use winit::window::Window;
 
+use std::borrow::Cow;
+use std::path::PathBuf;
+
 use crate::color::{cursor_color, cursor_text_color, default_bg, default_fg, Rgb};
-use crate::config::{ShaderEffect, CONFIG};
+use crate::config::CONFIG;
 use crate::term::Term;
 
 use init::{
@@ -77,15 +80,9 @@ impl Renderer {
             text_renderer,
         } = init_text_stack(&device, &queue, format);
         let quads = QuadPipeline::new(&device, format);
-        let post = match CONFIG.shader.active() {
-            ShaderEffect::None => None,
-            ShaderEffect::NewpixieCrt => Some(PostProcessor::new(
-                &device,
-                format,
-                config.width,
-                config.height,
-            )),
-        };
+        let post = resolve_shader_source().map(|src| {
+            PostProcessor::new(&device, format, config.width, config.height, &src)
+        });
 
         let scale = window.scale_factor() as f32;
         let (font_size, line_height) = metrics_for(scale);
@@ -588,6 +585,61 @@ fn rgb_to_rgba(c: Rgb, a: f32) -> [f32; 4] {
         srgb_to_linear(c.2) as f32,
         a,
     ]
+}
+
+/// Resolve the WGSL source for the configured post-processing effect.
+/// `"none"` (or `enabled = false`) → no post pass. Built-ins resolve at
+/// compile time. Anything else is read from `~/.config/evelyn/shaders/`.
+fn resolve_shader_source() -> Option<Cow<'static, str>> {
+    let name = CONFIG.shader.effect_name();
+    if name == "none" {
+        return None;
+    }
+    if let Some(src) = builtin_shader_source(name) {
+        eprintln!("[evelyn] loaded shader: {name} (built-in)");
+        return Some(Cow::Borrowed(src));
+    }
+    let path = match user_shader_path(name) {
+        Some(p) => p,
+        None => {
+            eprintln!("[evelyn] $HOME unset; cannot resolve shader {name:?}");
+            return None;
+        }
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(src) => {
+            eprintln!("[evelyn] loaded shader: {name} ({})", path.display());
+            Some(Cow::Owned(src))
+        }
+        Err(e) => {
+            eprintln!("[evelyn] shader {name:?} load failed: {e}");
+            None
+        }
+    }
+}
+
+fn builtin_shader_source(name: &str) -> Option<&'static str> {
+    match name {
+        "newpixie-crt" => Some(include_str!("shaders/newpixie_crt.wgsl")),
+        _ => None,
+    }
+}
+
+fn user_shader_path(name: &str) -> Option<PathBuf> {
+    let dir = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            PathBuf::from(xdg).join("evelyn/shaders")
+        } else {
+            PathBuf::from(std::env::var("HOME").ok()?).join(".config/evelyn/shaders")
+        }
+    } else {
+        PathBuf::from(std::env::var("HOME").ok()?).join(".config/evelyn/shaders")
+    };
+    Some(if name.ends_with(".wgsl") {
+        dir.join(name)
+    } else {
+        dir.join(format!("{name}.wgsl"))
+    })
 }
 
 fn font_attrs() -> Attrs<'static> {
