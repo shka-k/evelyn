@@ -455,6 +455,7 @@ name = "evelyn"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "glyphon",
  "pollster",
  "portable-pty",

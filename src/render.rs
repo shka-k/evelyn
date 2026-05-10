@@ -13,6 +13,7 @@ use wgpu::{
 };
 use winit::window::Window;
 
+use crate::quad::{QuadPipeline, Rect};
 use crate::term::{Term, DEFAULT_BG};
 
 pub struct Renderer {
@@ -27,6 +28,7 @@ pub struct Renderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     buffer: Buffer,
+    quads: QuadPipeline,
     scale: f32,
     pub font_size: f32,
     pub line_height: f32,
@@ -74,6 +76,7 @@ impl Renderer {
         let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        let quads = QuadPipeline::new(&device, format);
 
         let scale = window.scale_factor() as f32;
         let font_size_pt: f32 = 14.0;
@@ -107,6 +110,7 @@ impl Renderer {
             atlas,
             text_renderer,
             buffer,
+            quads,
             scale,
             font_size,
             line_height,
@@ -236,6 +240,23 @@ impl Renderer {
             });
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
+
+            // Cursor outline drawn over the text so it stays visible regardless of glyph color.
+            let cursor_rects = build_cursor_outline(
+                term.cur_x as f32 * self.cell_width,
+                term.cur_y as f32 * self.line_height,
+                self.cell_width,
+                self.line_height,
+                (2.0 * self.scale).round().max(1.0),
+            );
+            self.quads.draw(
+                &self.device,
+                &self.queue,
+                &mut pass,
+                self.config.width as f32,
+                self.config.height as f32,
+                &cursor_rects,
+            );
         }
         self.queue.submit(Some(encoder.finish()));
         self.window.pre_present_notify();
@@ -263,6 +284,16 @@ fn measure_cell_width(fs: &mut FontSystem, font_size: f32, line_height: f32) -> 
     } else {
         font_size * 0.6
     }
+}
+
+fn build_cursor_outline(x: f32, y: f32, w: f32, h: f32, t: f32) -> [Rect; 4] {
+    const COLOR: [f32; 4] = [0.90, 0.78, 0.20, 1.0]; // amber/yellow
+    [
+        Rect { x, y, w, h: t, color: COLOR },                       // top
+        Rect { x, y: y + h - t, w, h: t, color: COLOR },            // bottom
+        Rect { x, y, w: t, h, color: COLOR },                       // left
+        Rect { x: x + w - t, y, w: t, h, color: COLOR },            // right
+    ]
 }
 
 fn srgb_to_linear(c: u8) -> f64 {

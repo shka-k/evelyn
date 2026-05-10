@@ -1,6 +1,7 @@
 mod app;
 mod input;
 mod pty;
+mod quad;
 mod render;
 mod term;
 
