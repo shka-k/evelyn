@@ -266,14 +266,12 @@ impl Renderer {
             None => &surface_view,
         };
 
-        // Screen-wide background: alt-screen apps like helix paint the
-        // whole grid with a non-default bg, but the padding around the
-        // grid only sees the surface clear. If we clear with theme bg,
-        // the rectangular cell-grid edge becomes visible against the
-        // padding — and curve()/vignette in the post pass turn that
-        // edge into a hard rectangle in the corners. Use cell (0,0)'s
-        // bg as a proxy for the dominant screen bg so padding matches.
-        let screen_bg = term.cells.first().map(|c| c.bg).unwrap_or_else(default_bg);
+        // Use the theme background for both the surface clear and the
+        // build_bg_quads skip key. Stable across app changes (helix /
+        // zellij / shell don't shift the padding color), at the cost of
+        // a tiny color step at the cell-grid edge for apps that paint a
+        // non-default bg. The corner vignette mostly hides it.
+        let screen_bg = default_bg();
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor { label: None });
@@ -421,9 +419,9 @@ impl Renderer {
             let row_start = (y as usize) * cols;
             let mut x: usize = 0;
             while x < cols {
-                let bg = term.cells[row_start + x].bg;
+                let bg = term.cells[row_start + x].bg_eff();
                 let mut end = x + 1;
-                while end < cols && term.cells[row_start + end].bg == bg {
+                while end < cols && term.cells[row_start + end].bg_eff() == bg {
                     end += 1;
                 }
                 if bg != screen_bg {
@@ -488,7 +486,7 @@ fn build_runs(
             let cell_attrs = if is_cursor {
                 cursor_override.as_ref().unwrap().2.clone()
             } else {
-                attrs_for_cell(base.clone(), cell.fg, cell.bold)
+                attrs_for_cell(base.clone(), cell.fg_eff(), cell.bold)
             };
             // Cursor or wide cells always get their own single-cell run.
             let solo = is_cursor || cell.wide;

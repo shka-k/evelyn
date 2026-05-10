@@ -20,6 +20,20 @@ impl Perform for Term {
         }
     }
 
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
+        match byte {
+            b'7' => self.save_cursor(),    // DECSC
+            b'8' => self.restore_cursor(), // DECRC
+            b'M' => self.reverse_index(),  // RI: scroll within region if at top
+            b'D' => self.line_feed(),      // IND: like LF
+            b'E' => {                      // NEL: CR + LF
+                self.carriage_return();
+                self.line_feed();
+            }
+            _ => {}
+        }
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         let term_seq: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         let Some(num_bytes) = params.first() else { return };
@@ -126,6 +140,31 @@ impl Perform for Term {
                 let mode = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
                 self.erase_in_line(mode);
             }
+            's' => self.save_cursor(),
+            'u' => self.restore_cursor(),
+            'r' => {
+                // DECSTBM: top;bottom in 1-based row indices. Both omitted
+                // means reset region to the full screen.
+                let mut it = params.iter();
+                let top = it.next().and_then(|p| p.first().copied()).unwrap_or(1).max(1);
+                let bot = it
+                    .next()
+                    .and_then(|p| p.first().copied())
+                    .filter(|&v| v != 0)
+                    .unwrap_or(self.rows);
+                self.set_scroll_region(top.saturating_sub(1), bot.saturating_sub(1));
+                self.dirty = true;
+            }
+            'L' => self.insert_lines(first_param(params, 1)),
+            'M' => self.delete_lines(first_param(params, 1)),
+            'S' => {
+                self.scroll_up_in_region(first_param(params, 1));
+                self.dirty = true;
+            }
+            'T' => {
+                self.scroll_down_in_region(first_param(params, 1));
+                self.dirty = true;
+            }
             _ => {}
         }
     }
@@ -177,7 +216,9 @@ fn sgr(term: &mut Term, params: &Params) {
         match p {
             0 => term.reset_attrs(),
             1 => term.bold = true,
+            7 => term.reverse = true,
             22 => term.bold = false,
+            27 => term.reverse = false,
             30..=37 => term.fg = ansi_basic((p - 30) as u8, false),
             90..=97 => term.fg = ansi_basic((p - 90) as u8, true),
             40..=47 => term.bg = ansi_basic((p - 40) as u8, false),

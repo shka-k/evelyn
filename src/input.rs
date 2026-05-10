@@ -7,50 +7,98 @@ pub fn encode_key(event: &KeyEvent, mods: &Modifiers) -> Option<Vec<u8>> {
         return None;
     }
     let m = mods.state();
+    let shift = m.shift_key();
     let ctrl = m.control_key();
-    let alt = m.alt_key() || m.super_key(); // treat Cmd as Alt-ish on macOS for ESC-prefix Meta
+    // Cmd folds into alt on macOS so Cmd+Arrow keeps working as a "meta"
+    // modifier — most TUIs read it as a word/line jump.
+    let alt = m.alt_key() || m.super_key();
 
     if let Key::Named(named) = &event.logical_key {
-        let bytes: &[u8] = match named {
-            NamedKey::Enter => b"\r",
-            NamedKey::Backspace => b"\x7f",
-            NamedKey::Tab => b"\t",
-            NamedKey::Escape => b"\x1b",
-            NamedKey::ArrowUp => b"\x1b[A",
-            NamedKey::ArrowDown => b"\x1b[B",
-            NamedKey::ArrowRight => b"\x1b[C",
-            NamedKey::ArrowLeft => b"\x1b[D",
-            NamedKey::Home => b"\x1b[H",
-            NamedKey::End => b"\x1b[F",
-            NamedKey::PageUp => b"\x1b[5~",
-            NamedKey::PageDown => b"\x1b[6~",
-            NamedKey::Delete => b"\x1b[3~",
-            NamedKey::Insert => b"\x1b[2~",
-            NamedKey::F1 => b"\x1bOP",
-            NamedKey::F2 => b"\x1bOQ",
-            NamedKey::F3 => b"\x1bOR",
-            NamedKey::F4 => b"\x1bOS",
-            NamedKey::Space => b" ",
-            _ => return None,
-        };
-        let mut out = Vec::with_capacity(bytes.len() + 1);
-        if alt {
-            out.push(0x1b);
-        }
-        out.extend_from_slice(bytes);
-        return Some(out);
+        return encode_named(named, shift, alt, ctrl);
     }
 
     // Character keys: prefer event.text (which already accounts for shift / dead keys).
     let text = event.text.as_deref().unwrap_or("");
     if text.is_empty() {
-        // Fallback: pull a single character out of the logical key.
         if let Key::Character(s) = &event.logical_key {
             return encode_chars(s, ctrl, alt);
         }
         return None;
     }
     encode_chars(text, ctrl, alt)
+}
+
+/// xterm-style modifier code: 1 + shift + 2*alt + 4*ctrl. Used inside
+/// `CSI 1; <m> X` / `CSI N; <m> ~` for cursor / nav / function keys.
+fn modifier_code(shift: bool, alt: bool, ctrl: bool) -> u8 {
+    1u8 + (shift as u8) + 2 * (alt as u8) + 4 * (ctrl as u8)
+}
+
+fn encode_named(named: &NamedKey, shift: bool, alt: bool, ctrl: bool) -> Option<Vec<u8>> {
+    let m_code = modifier_code(shift, alt, ctrl);
+    let modded = m_code > 1;
+
+    // Cursor / Home / End: `\x1b[X` bare, `\x1b[1;<m>X` with modifier.
+    let csi_letter = |letter: u8| -> Vec<u8> {
+        if modded {
+            format!("\x1b[1;{}{}", m_code, letter as char).into_bytes()
+        } else {
+            vec![0x1b, b'[', letter]
+        }
+    };
+    // PageUp/Down, Insert, Delete: `\x1b[N~` bare, `\x1b[N;<m>~` modded.
+    let csi_tilde = |n: u8| -> Vec<u8> {
+        if modded {
+            format!("\x1b[{};{}~", n, m_code).into_bytes()
+        } else {
+            format!("\x1b[{}~", n).into_bytes()
+        }
+    };
+    // F1-F4: SS3 form (`\x1bOP`…) bare, `\x1b[1;<m>P`… modded — matches
+    // xterm and what helix / fish / zsh actually look up in their tables.
+    let csi_fkey = |letter: u8| -> Vec<u8> {
+        if modded {
+            format!("\x1b[1;{}{}", m_code, letter as char).into_bytes()
+        } else {
+            vec![0x1b, b'O', letter]
+        }
+    };
+
+    let bytes = match named {
+        NamedKey::ArrowUp => csi_letter(b'A'),
+        NamedKey::ArrowDown => csi_letter(b'B'),
+        NamedKey::ArrowRight => csi_letter(b'C'),
+        NamedKey::ArrowLeft => csi_letter(b'D'),
+        NamedKey::Home => csi_letter(b'H'),
+        NamedKey::End => csi_letter(b'F'),
+        NamedKey::PageUp => csi_tilde(5),
+        NamedKey::PageDown => csi_tilde(6),
+        NamedKey::Insert => csi_tilde(2),
+        NamedKey::Delete => csi_tilde(3),
+        NamedKey::F1 => csi_fkey(b'P'),
+        NamedKey::F2 => csi_fkey(b'Q'),
+        NamedKey::F3 => csi_fkey(b'R'),
+        NamedKey::F4 => csi_fkey(b'S'),
+        // Keys that don't carry an xterm modifier code: fall back to
+        // the plain byte sequence with an ESC prefix for alt/meta.
+        NamedKey::Enter => return Some(esc_prefix(b"\r", alt)),
+        NamedKey::Backspace => return Some(esc_prefix(b"\x7f", alt)),
+        NamedKey::Tab => return Some(esc_prefix(b"\t", alt)),
+        NamedKey::Escape => return Some(esc_prefix(b"\x1b", alt)),
+        NamedKey::Space => return Some(esc_prefix(b" ", alt)),
+        _ => return None,
+    };
+    Some(bytes)
+}
+
+fn esc_prefix(bytes: &[u8], alt: bool) -> Vec<u8> {
+    if !alt {
+        return bytes.to_vec();
+    }
+    let mut out = Vec::with_capacity(bytes.len() + 1);
+    out.push(0x1b);
+    out.extend_from_slice(bytes);
+    out
 }
 
 fn encode_chars(text: &str, ctrl: bool, alt: bool) -> Option<Vec<u8>> {
