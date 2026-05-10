@@ -14,9 +14,10 @@ pub struct Pty {
 }
 
 impl Pty {
-    pub fn spawn<F>(cols: u16, rows: u16, mut on_data: F) -> Result<Self>
+    pub fn spawn<F, G>(cols: u16, rows: u16, mut on_data: F, on_exit: G) -> Result<Self>
     where
         F: FnMut(Vec<u8>) + Send + 'static,
+        G: FnOnce() + Send + 'static,
     {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -49,6 +50,7 @@ impl Pty {
                     Err(_) => break,
                 }
             }
+            on_exit();
         });
 
         let writer = pair.master.take_writer()?;

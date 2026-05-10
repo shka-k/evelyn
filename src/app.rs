@@ -6,6 +6,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{Ime, KeyEvent, Modifiers, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::keyboard::Key;
 use winit::window::{Icon, Window, WindowAttributes, WindowId};
 
 use crate::config::CONFIG;
@@ -27,6 +28,7 @@ const IME_CANDIDATE_WIDTH_CELLS: f64 = 10.0;
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     PtyData(Vec<u8>),
+    PtyExit,
 }
 
 pub fn run() -> Result<()> {
@@ -279,9 +281,17 @@ impl ApplicationHandler<UserEvent> for App {
         self.term = Term::new(cols, rows);
 
         let proxy = self.proxy.clone();
-        let pty = match Pty::spawn(cols, rows, move |bytes| {
-            let _ = proxy.send_event(UserEvent::PtyData(bytes));
-        }) {
+        let exit_proxy = self.proxy.clone();
+        let pty = match Pty::spawn(
+            cols,
+            rows,
+            move |bytes| {
+                let _ = proxy.send_event(UserEvent::PtyData(bytes));
+            },
+            move || {
+                let _ = exit_proxy.send_event(UserEvent::PtyExit);
+            },
+        ) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("PTY spawn failed: {e}");
@@ -300,9 +310,10 @@ impl ApplicationHandler<UserEvent> for App {
         self.pty = Some(pty);
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyData(bytes) => self.on_pty_data(bytes),
+            UserEvent::PtyExit => event_loop.exit(),
         }
     }
 
@@ -325,7 +336,17 @@ impl ApplicationHandler<UserEvent> for App {
                 event,
                 is_synthetic,
                 ..
-            } => self.on_keyboard_input(event, is_synthetic),
+            } => {
+                if !is_synthetic
+                    && event.state.is_pressed()
+                    && self.modifiers.state().super_key()
+                    && matches!(&event.logical_key, Key::Character(s) if s.eq_ignore_ascii_case("w"))
+                {
+                    event_loop.exit();
+                    return;
+                }
+                self.on_keyboard_input(event, is_synthetic);
+            }
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
             WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::RedrawRequested => self.on_redraw(),
