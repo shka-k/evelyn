@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.102"
 bytemuck = "1"
 glyphon = "0.11.0"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 png = "0.18"
 pollster = "0.4.0"
 portable-pty = "0.9"

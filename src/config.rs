@@ -1,17 +1,78 @@
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Deserializer};
 
 use crate::color::Rgb;
 use crate::themes::BUILTIN_THEMES;
 
-/// User-tweakable settings. Loaded once on first access.
-///
-/// Search order: `$EVELYN_CONFIG` → `$XDG_CONFIG_HOME/evelyn/config.toml`
+/// User-tweakable settings. Returned as an `Arc` so callers can hold it
+/// across a hot-reload boundary without the file watcher pulling the rug
+/// out. Search order: `$EVELYN_CONFIG` → `$XDG_CONFIG_HOME/evelyn/config.toml`
 /// → `~/.config/evelyn/config.toml`. Missing file falls back silently;
-/// parse errors are logged and replaced with defaults.
-pub static CONFIG: LazyLock<Config> = LazyLock::new(load_or_default);
+/// parse errors are logged and the previous value is kept.
+pub fn config() -> Arc<Config> {
+    config_slot().read().unwrap().clone()
+}
+
+/// Effective theme — resolved from `config().theme` against either a
+/// built-in or a file under `~/.config/evelyn/themes/`. Same Arc snapshot
+/// pattern as [`config`] so render-time reads are stable.
+pub fn theme() -> Arc<ThemeConfig> {
+    theme_slot().read().unwrap().clone()
+}
+
+/// Re-read both files and atomically swap. Returns a snapshot of the
+/// previous and new values so callers can decide what to invalidate
+/// (e.g. rebuild the post-processor only when the shader effect changed).
+pub fn reload() -> Reload {
+    let prev_cfg = config();
+    let next_cfg = Arc::new(load_or_default());
+    *config_slot().write().unwrap() = next_cfg.clone();
+    let next_theme = Arc::new(resolve_theme_with(&next_cfg));
+    *theme_slot().write().unwrap() = next_theme;
+    Reload {
+        prev_cfg,
+        cfg: next_cfg,
+    }
+}
+
+/// Snapshot returned by [`reload`]. The renderer doesn't currently diff
+/// anything off of this, but the prev/next config pair lets the caller
+/// decide whether the theme path changed and the watcher needs respawning.
+pub struct Reload {
+    pub prev_cfg: Arc<Config>,
+    pub cfg: Arc<Config>,
+}
+
+fn config_slot() -> &'static RwLock<Arc<Config>> {
+    static SLOT: OnceLock<RwLock<Arc<Config>>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(Arc::new(load_or_default())))
+}
+
+fn theme_slot() -> &'static RwLock<Arc<ThemeConfig>> {
+    static SLOT: OnceLock<RwLock<Arc<ThemeConfig>>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(Arc::new(resolve_theme_with(&config()))))
+}
+
+/// Path of the live config file, if one is reachable. Hot-reload watchers
+/// use this to know what to subscribe to.
+pub fn config_file_path() -> Option<PathBuf> {
+    config_path()
+}
+
+/// Path of the theme file currently in use, when the active theme resolves
+/// to an on-disk file (not a built-in). Returns `None` for built-ins or
+/// when no theme is set, so the watcher only subscribes to real paths.
+pub fn theme_file_path() -> Option<PathBuf> {
+    let cfg = config();
+    let name = cfg.theme.as_deref()?;
+    if lookup_builtin_theme(name).is_some() {
+        return None;
+    }
+    let dir = themes_dir()?;
+    Some(dir.join(format!("{name}.toml")))
+}
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -220,10 +281,8 @@ impl Config {
     }
 }
 
-pub static RESOLVED_THEME: LazyLock<ThemeConfig> = LazyLock::new(resolve_theme);
-
-fn resolve_theme() -> ThemeConfig {
-    let Some(name) = CONFIG.theme.as_deref() else {
+fn resolve_theme_with(cfg: &Config) -> ThemeConfig {
+    let Some(name) = cfg.theme.as_deref() else {
         return ThemeConfig::default();
     };
     // Built-ins first — no file IO and no surprise fallbacks if the user's
@@ -233,13 +292,7 @@ fn resolve_theme() -> ThemeConfig {
         return theme;
     }
     let path = match themes_dir() {
-        Some(d) => {
-            if name.ends_with(".toml") {
-                d.join(name)
-            } else {
-                d.join(format!("{name}.toml"))
-            }
-        }
+        Some(d) => d.join(format!("{name}.toml")),
         None => {
             eprintln!("[evelyn] $HOME unset; cannot resolve theme {name:?}");
             return ThemeConfig::default();
@@ -437,3 +490,4 @@ fn load_or_default() -> Config {
         }
     }
 }
+

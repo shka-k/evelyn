@@ -3,7 +3,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-use crate::config::CONFIG;
+use crate::config::config;
 
 const TERM_ENV: &str = "xterm-256color";
 
@@ -27,7 +27,7 @@ impl Pty {
             pixel_height: 0,
         })?;
 
-        let mut cmd = CommandBuilder::new(CONFIG.resolved_shell());
+        let mut cmd = CommandBuilder::new(config().resolved_shell());
         if let Ok(home) = std::env::var("HOME") {
             cmd.cwd(home);
         }

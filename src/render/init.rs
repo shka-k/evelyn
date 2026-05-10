@@ -10,7 +10,7 @@ use wgpu::{
 };
 use winit::window::Window;
 
-use crate::config::CONFIG;
+use crate::config::config;
 
 use super::font_attrs;
 
@@ -90,8 +90,9 @@ pub(super) fn init_text_stack(
 }
 
 pub(super) fn metrics_for(scale: f32) -> (f32, f32) {
-    let font_size = (CONFIG.font.size_pt * scale).round();
-    let line_height = (font_size * CONFIG.font.line_height_factor).round();
+    let cfg = config();
+    let font_size = (cfg.font.size_pt * scale).round();
+    let line_height = (font_size * cfg.font.line_height_factor).round();
     (font_size, line_height)
 }
 

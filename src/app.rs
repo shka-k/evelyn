@@ -1,6 +1,9 @@
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use vte::Parser;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
@@ -9,7 +12,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::Key;
 use winit::window::{Icon, Window, WindowAttributes, WindowId};
 
-use crate::config::CONFIG;
+use crate::config::{self, config};
 use crate::input::encode_key;
 use crate::pty::Pty;
 use crate::render::Renderer;
@@ -29,6 +32,10 @@ const IME_CANDIDATE_WIDTH_CELLS: f64 = 10.0;
 pub enum UserEvent {
     PtyData(Vec<u8>),
     PtyExit,
+    /// `~/.config/evelyn/config.toml` (or its theme file) changed on disk.
+    /// Coalesced via the timestamp so editor "atomic save" patterns that
+    /// fire several events in a row only reload once.
+    ConfigReload,
 }
 
 pub fn run() -> Result<()> {
@@ -51,6 +58,12 @@ struct App {
     /// Sub-line wheel delta accumulator — trackpads send fractional lines
     /// per event, and dropping the fraction would freeze slow scrolls.
     scroll_accum: f32,
+    /// Held to keep the file watcher alive — drop = unwatch. We don't
+    /// interact with it after spawn; the callback owns the proxy clone.
+    _config_watcher: Option<RecommendedWatcher>,
+    /// Timestamp of the last reload, used to debounce bursty save events
+    /// (e.g. editors that write to a temp file and rename).
+    last_reload: Option<Instant>,
 }
 
 impl App {
@@ -65,6 +78,8 @@ impl App {
             modifiers: Modifiers::default(),
             preedit: String::new(),
             scroll_accum: 0.0,
+            _config_watcher: None,
+            last_reload: None,
         }
     }
 
@@ -92,7 +107,7 @@ impl App {
             return;
         };
         let scale = w.scale_factor();
-        let pad = CONFIG.window.padding as f64;
+        let pad = config().window.padding as f64;
         let x = self.term.cur_x as f64 * r.cell_width as f64 / scale + pad;
         let y = (self.term.cur_y as f64 * r.line_height as f64 + r.line_height as f64) / scale + pad;
         let cell_w = r.cell_width as f64 / scale;
@@ -232,6 +247,85 @@ impl App {
         }
     }
 
+    /// Re-read config + theme files and propagate the change to the
+    /// renderer + grid. Coalesces bursty filesystem events so editors
+    /// that write atomically (rename-into-place) don't trigger 3-4
+    /// reloads in a row.
+    fn on_config_reload(&mut self) {
+        const DEBOUNCE: Duration = Duration::from_millis(50);
+        if let Some(prev) = self.last_reload
+            && prev.elapsed() < DEBOUNCE
+        {
+            return;
+        }
+        self.last_reload = Some(Instant::now());
+
+        let snap = config::reload();
+        // If the active theme file changed (built-in → file, or vice
+        // versa, or a different filename), refresh the watcher subscription
+        // so the new path is the one we get notified about.
+        if snap.cfg.theme != snap.prev_cfg.theme {
+            self.respawn_config_watcher();
+        }
+        eprintln!("[evelyn] config reloaded");
+        if let Some(r) = self.renderer.as_mut() {
+            let cell_changed = r.reload_from_config();
+            if cell_changed {
+                self.sync_grid();
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Spawn a `notify` watcher subscribed to the config + theme paths.
+    /// macOS FSEvents fires on any change in the parent dir, but we filter
+    /// down to just our two files so unrelated edits in `~/.config/evelyn/`
+    /// don't cause needless reloads.
+    fn respawn_config_watcher(&mut self) {
+        let cfg_path = config::config_file_path();
+        let theme_path = config::theme_file_path();
+        let watch_paths: Vec<PathBuf> = cfg_path.iter().chain(theme_path.iter()).cloned().collect();
+        if watch_paths.is_empty() {
+            self._config_watcher = None;
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let watch_set = watch_paths.clone();
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let Ok(event) = res else { return };
+            // FSEvents on macOS coalesces by path-prefix; be strict that one
+            // of the watched files is actually in the event's path list.
+            if !event.paths.iter().any(|p| watch_set.iter().any(|w| p == w)) {
+                return;
+            }
+            let _ = proxy.send_event(UserEvent::ConfigReload);
+        });
+        let mut watcher = match watcher {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[evelyn] config watcher init failed: {e}");
+                self._config_watcher = None;
+                return;
+            }
+        };
+        // Watch the parent dir non-recursively. Watching the file directly
+        // misses atomic-rename saves (the inode swaps under us), and FSEvents
+        // is per-directory anyway.
+        let mut watched_any = false;
+        for p in watch_paths.iter().filter_map(|p| p.parent()) {
+            if let Err(e) = watcher.watch(p, RecursiveMode::NonRecursive) {
+                eprintln!("[evelyn] watcher.watch({}) failed: {e}", p.display());
+            } else {
+                watched_any = true;
+            }
+        }
+        if watched_any {
+            self._config_watcher = Some(watcher);
+        } else {
+            self._config_watcher = None;
+        }
+    }
+
     fn on_pty_data(&mut self, bytes: Vec<u8>) {
         self.parser.advance(&mut self.term, &bytes);
         if !self.term.replies.is_empty() {
@@ -308,12 +402,14 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.pty = Some(pty);
+        self.respawn_config_watcher();
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyData(bytes) => self.on_pty_data(bytes),
             UserEvent::PtyExit => event_loop.exit(),
+            UserEvent::ConfigReload => self.on_config_reload(),
         }
     }
 
@@ -340,10 +436,16 @@ impl ApplicationHandler<UserEvent> for App {
                 if !is_synthetic
                     && event.state.is_pressed()
                     && self.modifiers.state().super_key()
-                    && matches!(&event.logical_key, Key::Character(s) if s.eq_ignore_ascii_case("w"))
+                    && let Key::Character(s) = &event.logical_key
                 {
-                    event_loop.exit();
-                    return;
+                    if s.eq_ignore_ascii_case("w") {
+                        event_loop.exit();
+                        return;
+                    }
+                    if s.eq_ignore_ascii_case("r") {
+                        self.on_config_reload();
+                        return;
+                    }
                 }
                 self.on_keyboard_input(event, is_synthetic);
             }

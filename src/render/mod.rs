@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 
 use crate::color::{cursor_color, cursor_text_color, default_bg, default_fg, Rgb};
-use crate::config::CONFIG;
+use crate::config::config as live_config;
 use crate::term::Term;
 
 use init::{
@@ -55,7 +55,7 @@ pub struct Renderer {
     pub font_size: f32,
     pub line_height: f32,
     pub cell_width: f32,
-    /// Window inset around the grid in surface pixels. `CONFIG.window.padding`
+    /// Window inset around the grid in surface pixels. `live_config().window.padding`
     /// scaled to physical pixels.
     padding: f32,
 }
@@ -86,7 +86,7 @@ impl Renderer {
 
         let scale = window.scale_factor() as f32;
         let (font_size, line_height) = metrics_for(scale);
-        let padding = (CONFIG.window.padding * scale).round();
+        let padding = (live_config().window.padding * scale).round();
 
         let row_buffers: Vec<Buffer> = Vec::new();
         let mut preedit_buffer = make_buffer(&mut font_system, font_size, line_height);
@@ -137,13 +137,54 @@ impl Renderer {
         let (font_size, line_height) = metrics_for(scale);
         self.font_size = font_size;
         self.line_height = line_height;
-        self.padding = (CONFIG.window.padding * scale).round();
+        self.padding = (live_config().window.padding * scale).round();
         let m = Metrics::new(font_size, line_height);
         for buf in &mut self.row_buffers {
             buf.set_metrics(&mut self.font_system, m);
         }
         self.preedit_buffer.set_metrics(&mut self.font_system, m);
         self.cell_width = measure_cell_width(&mut self.font_system, font_size, line_height);
+    }
+
+    /// Re-derive everything that comes from the config: font metrics, cell
+    /// width, padding, post-processor. Called after `config::reload`.
+    /// Returns `true` if the cell grid changed, so the caller can re-sync
+    /// the term + PTY size and request a redraw.
+    pub fn reload_from_config(&mut self) -> bool {
+        let old_cell_w = self.cell_width;
+        let old_line_h = self.line_height;
+        let old_padding = self.padding;
+
+        let (font_size, line_height) = metrics_for(self.scale);
+        self.font_size = font_size;
+        self.line_height = line_height;
+        self.padding = (live_config().window.padding * self.scale).round();
+        let m = Metrics::new(font_size, line_height);
+        for buf in &mut self.row_buffers {
+            buf.set_metrics(&mut self.font_system, m);
+        }
+        self.preedit_buffer.set_metrics(&mut self.font_system, m);
+        self.cell_width = measure_cell_width(&mut self.font_system, font_size, line_height);
+
+        // Rebuild the post-pass from scratch — config may have toggled the
+        // master switch, swapped the effect, or pointed at a fresh on-disk
+        // shader file we want to re-read.
+        self.post = resolve_shader_source().map(|src| {
+            PostProcessor::new(
+                &self.device,
+                self.config.format,
+                self.config.width,
+                self.config.height,
+                &src,
+            )
+        });
+        // The old atlas is keyed by the previous font/size — drop cached
+        // glyph rasters so freshly-shaped runs don't sample stale entries.
+        self.atlas.trim();
+
+        (self.cell_width - old_cell_w).abs() > f32::EPSILON
+            || (self.line_height - old_line_h).abs() > f32::EPSILON
+            || (self.padding - old_padding).abs() > f32::EPSILON
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -598,7 +639,8 @@ fn rgb_to_rgba(c: Rgb, a: f32) -> [f32; 4] {
 /// `"none"` (or `enabled = false`) → no post pass. Built-ins resolve at
 /// compile time. Anything else is read from `~/.config/evelyn/shaders/`.
 fn resolve_shader_source() -> Option<Cow<'static, str>> {
-    let name = CONFIG.shader.effect_name();
+    let cfg = live_config();
+    let name = cfg.shader.effect_name();
     if name == "none" {
         return None;
     }
@@ -650,12 +692,37 @@ fn user_shader_path(name: &str) -> Option<PathBuf> {
 }
 
 fn font_attrs() -> Attrs<'static> {
-    let name = CONFIG.font.family.as_deref().unwrap_or(BUNDLED_FONT_NAME);
+    let cfg = live_config();
+    let name = current_family_name(cfg.font.family.as_deref().unwrap_or(BUNDLED_FONT_NAME));
     let mut a = Attrs::new().family(Family::Name(name));
-    if !CONFIG.font.ligatures {
+    if !cfg.font.ligatures {
         a = a.font_features(ligatures_off());
     }
     a
+}
+
+/// Intern the active font-family name as a `&'static str` so `Attrs<'static>`
+/// (and the per-row `Run` it lands in) stays valid across hot reloads. The
+/// double-check on the read side avoids leaking on every render — only a
+/// genuine family change leaks one new string. `BUNDLED_FONT_NAME` is
+/// already static so the common case never allocates.
+fn current_family_name(want: &str) -> &'static str {
+    use std::sync::RwLock;
+    static SLOT: std::sync::OnceLock<RwLock<&'static str>> = std::sync::OnceLock::new();
+    let slot = SLOT.get_or_init(|| RwLock::new(BUNDLED_FONT_NAME));
+    {
+        let cur = slot.read().unwrap();
+        if *cur == want {
+            return *cur;
+        }
+    }
+    let leaked: &'static str = if want == BUNDLED_FONT_NAME {
+        BUNDLED_FONT_NAME
+    } else {
+        Box::leak(want.to_string().into_boxed_str())
+    };
+    *slot.write().unwrap() = leaked;
+    leaked
 }
 
 fn ligatures_off() -> FontFeatures {

@@ -1,27 +1,28 @@
-use crate::config::RESOLVED_THEME;
+use crate::config::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
 pub fn default_fg() -> Rgb {
-    RESOLVED_THEME.foreground
+    theme().foreground
 }
 
 pub fn default_bg() -> Rgb {
-    RESOLVED_THEME.background
+    theme().background
 }
 
 pub fn cursor_color() -> Rgb {
-    RESOLVED_THEME.cursor
+    theme().cursor
 }
 
 pub fn cursor_text_color() -> Rgb {
-    RESOLVED_THEME.cursor_text
+    theme().cursor_text
 }
 
 /// SGR 30-37 / 90-97 / 40-47 / 100-107.
 pub fn ansi_basic(n: u8, bright: bool) -> Rgb {
-    let p = &RESOLVED_THEME.ansi;
+    let t = theme();
+    let p = &t.ansi;
     let table = if bright {
         [
             p.bright_black,
