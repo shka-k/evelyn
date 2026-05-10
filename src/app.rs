@@ -3,7 +3,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use vte::Parser;
 use winit::application::ApplicationHandler;
-use winit::event::{Modifiers, WindowEvent};
+use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::event::{Ime, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -33,6 +34,7 @@ struct App {
     parser: Parser,
     pty: Option<Pty>,
     modifiers: Modifiers,
+    preedit: String,
 }
 
 impl App {
@@ -45,7 +47,23 @@ impl App {
             parser: Parser::new(),
             pty: None,
             modifiers: Modifiers::default(),
+            preedit: String::new(),
         }
+    }
+
+    fn update_ime_cursor_area(&self) {
+        let (Some(w), Some(r)) = (self.window.as_ref(), self.renderer.as_ref()) else {
+            return;
+        };
+        let scale = w.scale_factor();
+        let x = self.term.cur_x as f64 * r.cell_width as f64 / scale;
+        let y = (self.term.cur_y as f64 * r.line_height as f64 + r.line_height as f64) / scale;
+        let cell_w = r.cell_width as f64 / scale;
+        let cell_h = r.line_height as f64 / scale;
+        w.set_ime_cursor_area(
+            LogicalPosition::new(x, y),
+            LogicalSize::new(cell_w * 10.0, cell_h),
+        );
     }
 }
 
@@ -90,6 +108,7 @@ impl ApplicationHandler<UserEvent> for App {
         };
 
         eprintln!("[evelyn] grid={cols}x{rows}");
+        window.set_ime_allowed(true);
         window.focus_window();
         window.request_redraw();
 
@@ -164,15 +183,46 @@ impl ApplicationHandler<UserEvent> for App {
                 if is_synthetic {
                     return;
                 }
+                // While IME is composing, suppress key→PTY translation; the IME
+                // will deliver the result via Ime::Commit.
+                if !self.preedit.is_empty() {
+                    return;
+                }
                 if let Some(bytes) = encode_key(&event, &self.modifiers) {
                     if let Some(p) = &self.pty {
                         p.write(&bytes);
                     }
                 }
             }
+            WindowEvent::Ime(ime) => match ime {
+                Ime::Enabled | Ime::Disabled => {
+                    self.preedit.clear();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+                Ime::Preedit(text, _cursor) => {
+                    self.preedit = text;
+                    self.update_ime_cursor_area();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+                Ime::Commit(text) => {
+                    self.preedit.clear();
+                    if !text.is_empty() {
+                        if let Some(p) = &self.pty {
+                            p.write(text.as_bytes());
+                        }
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            },
             WindowEvent::RedrawRequested => {
                 if let Some(r) = self.renderer.as_mut() {
-                    if let Err(e) = r.render(&self.term) {
+                    if let Err(e) = r.render(&self.term, &self.preedit) {
                         eprintln!("render error: {e}");
                     }
                     self.term.dirty = false;

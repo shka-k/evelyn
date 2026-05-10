@@ -28,6 +28,7 @@ pub struct Renderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     buffer: Buffer,
+    preedit_buffer: Buffer,
     quads: QuadPipeline,
     scale: f32,
     pub font_size: f32,
@@ -88,6 +89,13 @@ impl Renderer {
             Some(size.width as f32),
             Some(size.height as f32),
         );
+        let mut preedit_buffer =
+            Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        preedit_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(line_height * 2.0),
+        );
         let cell_width = measure_cell_width(&mut font_system, font_size, line_height);
         eprintln!(
             "[evelyn] surface={}x{} scale={} font={}px cell={}x{}",
@@ -110,6 +118,7 @@ impl Renderer {
             atlas,
             text_renderer,
             buffer,
+            preedit_buffer,
             quads,
             scale,
             font_size,
@@ -127,6 +136,8 @@ impl Renderer {
         self.font_size = (font_size_pt * scale).round();
         self.line_height = (self.font_size * 1.3_f32).round();
         self.buffer
+            .set_metrics(&mut self.font_system, Metrics::new(self.font_size, self.line_height));
+        self.preedit_buffer
             .set_metrics(&mut self.font_system, Metrics::new(self.font_size, self.line_height));
         self.cell_width = measure_cell_width(&mut self.font_system, self.font_size, self.line_height);
     }
@@ -148,7 +159,7 @@ impl Renderer {
         (cols, rows)
     }
 
-    pub fn render(&mut self, term: &Term) -> Result<()> {
+    pub fn render(&mut self, term: &Term, preedit: &str) -> Result<()> {
         let mut text = String::with_capacity(term.cells.len() + term.rows as usize);
         for y in 0..term.rows {
             for x in 0..term.cols {
@@ -167,6 +178,25 @@ impl Renderer {
         self.buffer
             .shape_until_scroll(&mut self.font_system, false);
 
+        let has_preedit = !preedit.is_empty();
+        let mut preedit_w: f32 = 0.0;
+        if has_preedit {
+            self.preedit_buffer.set_text(
+                &mut self.font_system,
+                preedit,
+                &attrs,
+                Shaping::Advanced,
+                None,
+            );
+            self.preedit_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            for run in self.preedit_buffer.layout_runs() {
+                for g in run.glyphs.iter() {
+                    preedit_w = preedit_w.max(g.x + g.w);
+                }
+            }
+        }
+
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -175,26 +205,44 @@ impl Renderer {
             },
         );
 
+        let pre_left = term.cur_x as f32 * self.cell_width;
+        let pre_top = term.cur_y as f32 * self.line_height;
+
+        let bounds = TextBounds {
+            left: 0,
+            top: 0,
+            right: self.config.width as i32,
+            bottom: self.config.height as i32,
+        };
+        let mut areas: Vec<TextArea> = Vec::with_capacity(2);
+        areas.push(TextArea {
+            buffer: &self.buffer,
+            left: 0.0,
+            top: 0.0,
+            scale: 1.0,
+            bounds,
+            default_color: Color::rgb(0xd0, 0xd0, 0xd0),
+            custom_glyphs: &[],
+        });
+        if has_preedit {
+            areas.push(TextArea {
+                buffer: &self.preedit_buffer,
+                left: pre_left,
+                top: pre_top,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgb(0xff, 0xe0, 0x70),
+                custom_glyphs: &[],
+            });
+        }
+
         self.text_renderer.prepare(
             &self.device,
             &self.queue,
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
-            [TextArea {
-                buffer: &self.buffer,
-                left: 0.0,
-                top: 0.0,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: self.config.width as i32,
-                    bottom: self.config.height as i32,
-                },
-                default_color: Color::rgb(0xd0, 0xd0, 0xd0),
-                custom_glyphs: &[],
-            }],
+            areas,
             &mut self.swash_cache,
         )?;
 
@@ -241,21 +289,34 @@ impl Renderer {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
 
-            // Cursor outline drawn over the text so it stays visible regardless of glyph color.
-            let cursor_rects = build_cursor_outline(
-                term.cur_x as f32 * self.cell_width,
-                term.cur_y as f32 * self.line_height,
-                self.cell_width,
-                self.line_height,
-                (2.0 * self.scale).round().max(1.0),
-            );
+            let stroke = (2.0 * self.scale).round().max(1.0);
+            let overlay: Vec<Rect> = if has_preedit {
+                // Underline marking the IME composing region.
+                let w = preedit_w.max(self.cell_width);
+                vec![Rect {
+                    x: pre_left,
+                    y: pre_top + self.line_height - stroke,
+                    w,
+                    h: stroke,
+                    color: [1.0, 0.88, 0.44, 1.0],
+                }]
+            } else {
+                build_cursor_outline(
+                    term.cur_x as f32 * self.cell_width,
+                    term.cur_y as f32 * self.line_height,
+                    self.cell_width,
+                    self.line_height,
+                    stroke,
+                )
+                .to_vec()
+            };
             self.quads.draw(
                 &self.device,
                 &self.queue,
                 &mut pass,
                 self.config.width as f32,
                 self.config.height as f32,
-                &cursor_rects,
+                &overlay,
             );
         }
         self.queue.submit(Some(encoder.finish()));
