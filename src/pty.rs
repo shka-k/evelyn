@@ -31,6 +31,10 @@ impl Pty {
             cmd.cwd(home);
         }
         cmd.env("TERM", TERM_ENV);
+        // Apps like helix/crossterm gate 24-bit color on COLORTERM rather
+        // than terminfo. Without this they fall back to the 16/256-color
+        // palette and themes render with the wrong colors.
+        cmd.env("COLORTERM", "truecolor");
 
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
