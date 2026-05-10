@@ -8,6 +8,7 @@ use winit::event::{Ime, KeyEvent, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+use crate::config::CONFIG;
 use crate::input::encode_key;
 use crate::pty::Pty;
 use crate::render::Renderer;
@@ -81,8 +82,9 @@ impl App {
             return;
         };
         let scale = w.scale_factor();
-        let x = self.term.cur_x as f64 * r.cell_width as f64 / scale;
-        let y = (self.term.cur_y as f64 * r.line_height as f64 + r.line_height as f64) / scale;
+        let pad = CONFIG.window.padding as f64;
+        let x = self.term.cur_x as f64 * r.cell_width as f64 / scale + pad;
+        let y = (self.term.cur_y as f64 * r.line_height as f64 + r.line_height as f64) / scale + pad;
         let cell_w = r.cell_width as f64 / scale;
         let cell_h = r.line_height as f64 / scale;
         w.set_ime_cursor_area(

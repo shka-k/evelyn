@@ -51,6 +51,9 @@ pub struct Renderer {
     pub font_size: f32,
     pub line_height: f32,
     pub cell_width: f32,
+    /// Window inset around the grid in surface pixels. `CONFIG.window.padding`
+    /// scaled to physical pixels.
+    padding: f32,
 }
 
 #[derive(Debug)]
@@ -76,6 +79,7 @@ impl Renderer {
 
         let scale = window.scale_factor() as f32;
         let (font_size, line_height) = metrics_for(scale);
+        let padding = (CONFIG.window.padding * scale).round();
 
         let row_buffers: Vec<Buffer> = Vec::new();
         let mut preedit_buffer = make_buffer(&mut font_system, font_size, line_height);
@@ -113,6 +117,7 @@ impl Renderer {
             font_size,
             line_height,
             cell_width,
+            padding,
         })
     }
 
@@ -124,6 +129,7 @@ impl Renderer {
         let (font_size, line_height) = metrics_for(scale);
         self.font_size = font_size;
         self.line_height = line_height;
+        self.padding = (CONFIG.window.padding * scale).round();
         let m = Metrics::new(font_size, line_height);
         for buf in &mut self.row_buffers {
             buf.set_metrics(&mut self.font_system, m);
@@ -139,8 +145,10 @@ impl Renderer {
     }
 
     pub fn grid_size(&self) -> (u16, u16) {
-        let cols = ((self.config.width as f32 / self.cell_width).floor() as u16).max(1);
-        let rows = ((self.config.height as f32 / self.line_height).floor() as u16).max(1);
+        let usable_w = (self.config.width as f32 - 2.0 * self.padding).max(0.0);
+        let usable_h = (self.config.height as f32 - 2.0 * self.padding).max(0.0);
+        let cols = ((usable_w / self.cell_width).floor() as u16).max(1);
+        let rows = ((usable_h / self.line_height).floor() as u16).max(1);
         (cols, rows)
     }
 
@@ -185,8 +193,8 @@ impl Renderer {
             },
         );
 
-        let pre_left = term.cur_x as f32 * self.cell_width;
-        let pre_top = term.cur_y as f32 * self.line_height;
+        let pre_left = term.cur_x as f32 * self.cell_width + self.padding;
+        let pre_top = term.cur_y as f32 * self.line_height + self.padding;
 
         let bounds = TextBounds {
             left: 0,
@@ -197,13 +205,14 @@ impl Renderer {
         // Row TextAreas: one per run, positioned at exact grid column.
         let cell_width = self.cell_width;
         let line_height = self.line_height;
+        let padding = self.padding;
         let mut areas: Vec<TextArea> = runs
             .iter()
             .enumerate()
             .map(|(i, run)| TextArea {
                 buffer: &self.row_buffers[i],
-                left: run.col as f32 * cell_width,
-                top: run.row as f32 * line_height,
+                left: run.col as f32 * cell_width + padding,
+                top: run.row as f32 * line_height + padding,
                 scale: 1.0,
                 bounds,
                 default_color: rgb_to_color(default_fg()),
@@ -362,8 +371,8 @@ impl Renderer {
             self.cell_width
         };
         vec![Rect {
-            x: term.cur_x as f32 * self.cell_width,
-            y: term.cur_y as f32 * self.line_height,
+            x: term.cur_x as f32 * self.cell_width + self.padding,
+            y: term.cur_y as f32 * self.line_height + self.padding,
             w: block_w,
             h: self.line_height,
             color: rgb_to_rgba(cursor_color(), 1.0),
@@ -388,8 +397,8 @@ impl Renderer {
                 }
                 if bg != bg_default {
                     quads.push(Rect {
-                        x: x as f32 * self.cell_width,
-                        y: y as f32 * self.line_height,
+                        x: x as f32 * self.cell_width + self.padding,
+                        y: y as f32 * self.line_height + self.padding,
                         w: (end - x) as f32 * self.cell_width,
                         h: self.line_height,
                         color: rgb_to_rgba(bg, 1.0),

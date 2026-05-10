@@ -17,6 +17,7 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(load_or_default);
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub font: FontConfig,
+    pub window: WindowConfig,
 
     /// Theme file name (without `.toml`) under `~/.config/evelyn/themes/`.
     /// The file must use the Alacritty `[colors.*]` schema, so you can
@@ -26,6 +27,20 @@ pub struct Config {
 
     /// Override the shell to spawn. `None` uses `$SHELL`, then `/bin/bash`.
     pub shell: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WindowConfig {
+    /// Inset between the window edge and the cell grid, in logical points.
+    /// Applied symmetrically on all four sides.
+    pub padding: f32,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self { padding: 8.0 }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,22 +103,38 @@ impl Default for ThemeConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AnsiPalette {
-    #[serde(deserialize_with = "de_rgb")] pub black: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub red: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub green: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub yellow: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub blue: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub magenta: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub cyan: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub white: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub bright_black: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub bright_red: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub bright_green: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub bright_yellow: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub bright_blue: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub bright_magenta: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub bright_cyan: Rgb,
-    #[serde(deserialize_with = "de_rgb")] pub bright_white: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub black: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub red: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub green: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub yellow: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub blue: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub magenta: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub cyan: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub white: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub bright_black: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub bright_red: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub bright_green: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub bright_yellow: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub bright_blue: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub bright_magenta: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub bright_cyan: Rgb,
+    #[serde(deserialize_with = "de_rgb")]
+    pub bright_white: Rgb,
 }
 
 impl Default for AnsiPalette {
@@ -212,8 +243,8 @@ fn themes_dir() -> Option<PathBuf> {
 }
 
 fn load_alacritty_theme(path: &PathBuf) -> Result<ThemeConfig, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let file: AlacrittyThemeFile =
         toml::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
     Ok(file.into_theme())
@@ -253,14 +284,22 @@ struct AlacrittyCursor {
 
 #[derive(Deserialize)]
 struct AlacrittyNormalBright {
-    #[serde(deserialize_with = "de_rgb_opt", default)] black: Option<Rgb>,
-    #[serde(deserialize_with = "de_rgb_opt", default)] red: Option<Rgb>,
-    #[serde(deserialize_with = "de_rgb_opt", default)] green: Option<Rgb>,
-    #[serde(deserialize_with = "de_rgb_opt", default)] yellow: Option<Rgb>,
-    #[serde(deserialize_with = "de_rgb_opt", default)] blue: Option<Rgb>,
-    #[serde(deserialize_with = "de_rgb_opt", default)] magenta: Option<Rgb>,
-    #[serde(deserialize_with = "de_rgb_opt", default)] cyan: Option<Rgb>,
-    #[serde(deserialize_with = "de_rgb_opt", default)] white: Option<Rgb>,
+    #[serde(deserialize_with = "de_rgb_opt", default)]
+    black: Option<Rgb>,
+    #[serde(deserialize_with = "de_rgb_opt", default)]
+    red: Option<Rgb>,
+    #[serde(deserialize_with = "de_rgb_opt", default)]
+    green: Option<Rgb>,
+    #[serde(deserialize_with = "de_rgb_opt", default)]
+    yellow: Option<Rgb>,
+    #[serde(deserialize_with = "de_rgb_opt", default)]
+    blue: Option<Rgb>,
+    #[serde(deserialize_with = "de_rgb_opt", default)]
+    magenta: Option<Rgb>,
+    #[serde(deserialize_with = "de_rgb_opt", default)]
+    cyan: Option<Rgb>,
+    #[serde(deserialize_with = "de_rgb_opt", default)]
+    white: Option<Rgb>,
 }
 
 impl AlacrittyThemeFile {
@@ -279,22 +318,42 @@ impl AlacrittyThemeFile {
                 .and_then(|c| c.text)
                 .unwrap_or(self.colors.primary.background),
             ansi: AnsiPalette {
-                black:   normal.and_then(|n| n.black  ).unwrap_or(defaults.ansi.black),
-                red:     normal.and_then(|n| n.red    ).unwrap_or(defaults.ansi.red),
-                green:   normal.and_then(|n| n.green  ).unwrap_or(defaults.ansi.green),
-                yellow:  normal.and_then(|n| n.yellow ).unwrap_or(defaults.ansi.yellow),
-                blue:    normal.and_then(|n| n.blue   ).unwrap_or(defaults.ansi.blue),
-                magenta: normal.and_then(|n| n.magenta).unwrap_or(defaults.ansi.magenta),
-                cyan:    normal.and_then(|n| n.cyan   ).unwrap_or(defaults.ansi.cyan),
-                white:   normal.and_then(|n| n.white  ).unwrap_or(defaults.ansi.white),
-                bright_black:   bright.and_then(|b| b.black  ).unwrap_or(defaults.ansi.bright_black),
-                bright_red:     bright.and_then(|b| b.red    ).unwrap_or(defaults.ansi.bright_red),
-                bright_green:   bright.and_then(|b| b.green  ).unwrap_or(defaults.ansi.bright_green),
-                bright_yellow:  bright.and_then(|b| b.yellow ).unwrap_or(defaults.ansi.bright_yellow),
-                bright_blue:    bright.and_then(|b| b.blue   ).unwrap_or(defaults.ansi.bright_blue),
-                bright_magenta: bright.and_then(|b| b.magenta).unwrap_or(defaults.ansi.bright_magenta),
-                bright_cyan:    bright.and_then(|b| b.cyan   ).unwrap_or(defaults.ansi.bright_cyan),
-                bright_white:   bright.and_then(|b| b.white  ).unwrap_or(defaults.ansi.bright_white),
+                black: normal.and_then(|n| n.black).unwrap_or(defaults.ansi.black),
+                red: normal.and_then(|n| n.red).unwrap_or(defaults.ansi.red),
+                green: normal.and_then(|n| n.green).unwrap_or(defaults.ansi.green),
+                yellow: normal
+                    .and_then(|n| n.yellow)
+                    .unwrap_or(defaults.ansi.yellow),
+                blue: normal.and_then(|n| n.blue).unwrap_or(defaults.ansi.blue),
+                magenta: normal
+                    .and_then(|n| n.magenta)
+                    .unwrap_or(defaults.ansi.magenta),
+                cyan: normal.and_then(|n| n.cyan).unwrap_or(defaults.ansi.cyan),
+                white: normal.and_then(|n| n.white).unwrap_or(defaults.ansi.white),
+                bright_black: bright
+                    .and_then(|b| b.black)
+                    .unwrap_or(defaults.ansi.bright_black),
+                bright_red: bright
+                    .and_then(|b| b.red)
+                    .unwrap_or(defaults.ansi.bright_red),
+                bright_green: bright
+                    .and_then(|b| b.green)
+                    .unwrap_or(defaults.ansi.bright_green),
+                bright_yellow: bright
+                    .and_then(|b| b.yellow)
+                    .unwrap_or(defaults.ansi.bright_yellow),
+                bright_blue: bright
+                    .and_then(|b| b.blue)
+                    .unwrap_or(defaults.ansi.bright_blue),
+                bright_magenta: bright
+                    .and_then(|b| b.magenta)
+                    .unwrap_or(defaults.ansi.bright_magenta),
+                bright_cyan: bright
+                    .and_then(|b| b.cyan)
+                    .unwrap_or(defaults.ansi.bright_cyan),
+                bright_white: bright
+                    .and_then(|b| b.white)
+                    .unwrap_or(defaults.ansi.bright_white),
             },
         }
     }
