@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 
 use crate::color::{cursor_color, cursor_text_color, default_bg, default_fg, Rgb};
-use crate::config::config as live_config;
+use crate::config::{config as live_config, CursorShape};
 use crate::term::Term;
 
 use init::{
@@ -219,23 +219,29 @@ impl Renderer {
         (cx + 1, cy + 1)
     }
 
-    pub fn render(&mut self, term: &Term, preedit: &str) -> Result<()> {
+    pub fn render(&mut self, term: &Term, preedit: &str, blink_on: bool) -> Result<()> {
         // Hide the cursor while the user is browsing scrollback — the
         // (cur_x, cur_y) position refers to the live screen and would
-        // paint at the wrong row inside the historical view.
-        let show_cursor = preedit.is_empty() && term.cursor_visible && term.view_offset == 0;
+        // paint at the wrong row inside the historical view. Also gate
+        // on the blink phase so a configured blink can hide it.
+        let show_cursor = preedit.is_empty()
+            && term.cursor_visible
+            && term.view_offset == 0
+            && blink_on;
         let cursor_wide = if show_cursor {
             cursor_cell(term).map(|(_, w)| w).unwrap_or(false)
         } else {
             false
         };
+        let cursor_shape = live_config().cursor.shape;
 
         // Build grid runs and shape each into a dedicated row buffer. This
         // keeps every run pinned to its grid column so font fallback widths
-        // can't drift the layout. The cursor cell becomes its own run with
-        // an inverted foreground color, painted on top of the solid block.
+        // can't drift the layout. Only the block shape inverts the cell
+        // character; bar/underline sit alongside the glyph so the regular
+        // foreground stays correct.
         let base = font_attrs();
-        let cursor_override = if show_cursor {
+        let cursor_override = if show_cursor && cursor_shape == CursorShape::Block {
             Some((
                 term.cur_x,
                 term.cur_y,
@@ -315,8 +321,16 @@ impl Renderer {
         let surface_view = frame
             .texture
             .create_view(&TextureViewDescriptor::default());
-        let overlay =
-            self.overlay_quads(term, has_preedit, preedit_w, show_cursor, cursor_wide, pre_left, pre_top);
+        let overlay = self.overlay_quads(
+            term,
+            has_preedit,
+            preedit_w,
+            show_cursor,
+            cursor_wide,
+            cursor_shape,
+            pre_left,
+            pre_top,
+        );
 
         // Either render the cell grid directly to the surface, or to an
         // offscreen texture that the post-pass will sample.
@@ -427,7 +441,9 @@ impl Renderer {
         max_x
     }
 
-    /// Solid cursor block, or — when IME is composing — the preedit underline.
+    /// Cursor in the configured shape, or — when IME is composing — the
+    /// preedit underline.
+    #[allow(clippy::too_many_arguments)]
     fn overlay_quads(
         &self,
         term: &Term,
@@ -435,6 +451,7 @@ impl Renderer {
         preedit_w: f32,
         show_cursor: bool,
         cursor_wide: bool,
+        cursor_shape: CursorShape,
         pre_left: f32,
         pre_top: f32,
     ) -> Vec<Rect> {
@@ -452,18 +469,41 @@ impl Renderer {
         if !show_cursor {
             return Vec::new();
         }
-        let block_w = if cursor_wide {
+        let cell_w = if cursor_wide {
             self.cell_width * 2.0
         } else {
             self.cell_width
         };
-        vec![Rect {
-            x: term.cur_x as f32 * self.cell_width + self.padding,
-            y: term.cur_y as f32 * self.line_height + self.padding,
-            w: block_w,
-            h: self.line_height,
-            color: rgb_to_rgba(cursor_color(), 1.0),
-        }]
+        let x = term.cur_x as f32 * self.cell_width + self.padding;
+        let y = term.cur_y as f32 * self.line_height + self.padding;
+        // Stripe thickness for bar/underline — 2pt scaled to physical
+        // pixels with a 1px floor so it never disappears at low DPI.
+        let stripe = (2.0 * self.scale).round().max(1.0);
+        let color = rgb_to_rgba(cursor_color(), 1.0);
+        let rect = match cursor_shape {
+            CursorShape::Block => Rect {
+                x,
+                y,
+                w: cell_w,
+                h: self.line_height,
+                color,
+            },
+            CursorShape::Underline => Rect {
+                x,
+                y: y + self.line_height - stripe,
+                w: cell_w,
+                h: stripe,
+                color,
+            },
+            CursorShape::Bar => Rect {
+                x,
+                y,
+                w: stripe,
+                h: self.line_height,
+                color,
+            },
+        };
+        vec![rect]
     }
 
     /// One opaque rect per maximal stretch of cells that share an SGR

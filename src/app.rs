@@ -8,7 +8,7 @@ use vte::Parser;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{Ime, KeyEvent, Modifiers, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::Key;
 use winit::window::{Icon, Window, WindowAttributes, WindowId};
 
@@ -68,6 +68,13 @@ struct App {
     /// Timestamp of the last reload, used to debounce bursty save events
     /// (e.g. editors that write to a temp file and rename).
     last_reload: Option<Instant>,
+    /// Current phase of the configured cursor blink. Always `true` when
+    /// blink is disabled in config — we just stop toggling it.
+    cursor_blink_on: bool,
+    /// When the blink phase was last flipped. `about_to_wait` schedules
+    /// the next flip relative to this so the half-period is stable
+    /// regardless of how often other events fire.
+    cursor_blink_last_toggle: Instant,
 }
 
 impl App {
@@ -85,6 +92,8 @@ impl App {
             cursor_pos: None,
             _config_watcher: None,
             last_reload: None,
+            cursor_blink_on: true,
+            cursor_blink_last_toggle: Instant::now(),
         }
     }
 
@@ -156,6 +165,7 @@ impl App {
                 self.term.reset_view();
                 self.request_redraw();
             }
+            self.poke_cursor_blink();
             if let Some(p) = &self.pty {
                 p.write(&bytes);
             }
@@ -276,11 +286,23 @@ impl App {
 
     fn on_redraw(&mut self) {
         if let Some(r) = self.renderer.as_mut() {
-            if let Err(e) = r.render(&self.term, &self.preedit) {
+            // When blink is disabled in config, blink_on is held at true so
+            // the cursor stays visible regardless of phase state.
+            let blink_on = !config().cursor.blink || self.cursor_blink_on;
+            if let Err(e) = r.render(&self.term, &self.preedit, blink_on) {
                 eprintln!("render error: {e}");
             }
             self.term.dirty = false;
         }
+    }
+
+    /// Snap the blink to "on" and reset the half-period timer. Called on
+    /// any input/output activity so the cursor stays solid while typing
+    /// and resumes blinking only after a full quiet interval — same UX
+    /// xterm and friends use.
+    fn poke_cursor_blink(&mut self) {
+        self.cursor_blink_on = true;
+        self.cursor_blink_last_toggle = Instant::now();
     }
 
     /// Re-read config + theme files and propagate the change to the
@@ -371,6 +393,7 @@ impl App {
             }
         }
         if self.term.dirty {
+            self.poke_cursor_blink();
             self.request_redraw();
         }
     }
@@ -491,6 +514,32 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::RedrawRequested => self.on_redraw(),
             _ => {}
+        }
+    }
+
+    /// Schedule the next event-loop wakeup for cursor blink. With blink
+    /// disabled we drop straight back to `Wait` so an idle terminal stays
+    /// fully idle. With blink enabled we toggle the phase whenever the
+    /// half-period has elapsed and arm a `WaitUntil` for the next flip,
+    /// so the wakeup rate matches the configured rate exactly.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let cfg = config();
+        if !cfg.cursor.blink {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+        // 50ms floor — runaway-config guard so a tiny value can't pin a
+        // CPU on busy-wakeup. Above that we trust the user.
+        let interval = Duration::from_millis(cfg.cursor.blink_interval_ms.max(50));
+        let now = Instant::now();
+        let next = self.cursor_blink_last_toggle + interval;
+        if now >= next {
+            self.cursor_blink_on = !self.cursor_blink_on;
+            self.cursor_blink_last_toggle = now;
+            self.request_redraw();
+            event_loop.set_control_flow(ControlFlow::WaitUntil(now + interval));
+        } else {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
         }
     }
 }
