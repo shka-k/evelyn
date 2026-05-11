@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use glyphon::{
+    cosmic_text::{fontdb, Fallback, PlatformFallback},
     Buffer, Cache, FontSystem, Metrics, Shaping, SwashCache, TextAtlas, TextRenderer, Viewport,
 };
+use unicode_script::Script;
 use wgpu::{
     CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor, MultisampleState,
     PowerPreference, PresentMode, RequestAdapterOptions, SurfaceConfiguration, TextureUsages,
@@ -77,10 +79,19 @@ pub(super) fn init_text_stack(
     queue: &wgpu::Queue,
     format: wgpu::TextureFormat,
 ) -> TextInit {
-    let mut font_system = FontSystem::new();
-    let db = font_system.db_mut();
+    // Mirror what `FontSystem::new()` does — load system fonts into a fresh
+    // db — but install our own `Fallback` so glyphs cosmic-text's built-in
+    // macOS table doesn't cover (e.g. Braille for gtop sparklines) get
+    // routed to a font that has them. Otherwise the primary Geist Mono +
+    // common fallbacks (Menlo / Geneva / Arial Unicode MS) all miss
+    // U+2800-U+28FF and the run renders as `.notdef` boxes.
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
     db.load_font_data(FONT_PRIMARY_REGULAR.to_vec());
     db.load_font_data(FONT_PRIMARY_BOLD.to_vec());
+    let locale = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string());
+    let font_system =
+        FontSystem::new_with_locale_and_db_and_fallback(locale, db, EvelynFallback::new());
     let swash_cache = SwashCache::new();
     let cache = Cache::new(device);
     let viewport = Viewport::new(device, &cache);
@@ -119,5 +130,38 @@ pub(super) fn measure_cell_width(fs: &mut FontSystem, font_size: f32, line_heigh
         max_x / PROBE.len() as f32
     } else {
         font_size * 0.6
+    }
+}
+
+/// Fallback wrapper that augments cosmic-text's `PlatformFallback` with
+/// scripts the upstream tables miss. The first hit on macOS is `Braille`:
+/// gtop/btop/htop sparklines emit U+2800-U+28FF, the bundled Geist Mono
+/// has zero glyphs in that block, and none of cosmic-text's macOS
+/// common-fallback fonts (Menlo, Geneva, Arial Unicode MS) cover it
+/// either — so without this the whole graph rendered as `.notdef` boxes.
+struct EvelynFallback {
+    inner: PlatformFallback,
+}
+
+impl EvelynFallback {
+    fn new() -> Self {
+        Self { inner: PlatformFallback }
+    }
+}
+
+impl Fallback for EvelynFallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        self.inner.common_fallback()
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        self.inner.forbidden_fallback()
+    }
+
+    fn script_fallback(&self, script: Script, locale: &str) -> &[&'static str] {
+        match script {
+            Script::Braille => &["Apple Braille"],
+            _ => self.inner.script_fallback(script, locale),
+        }
     }
 }
