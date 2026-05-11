@@ -19,7 +19,7 @@ pub const BUILTIN_THEMES: &[(&str, ThemeConfig)] = &[
 // evelyn icon and pairs well with the bundled CRT shader.
 pub const DEFAULT: ThemeConfig = ThemeConfig {
     background: Rgb(0x07, 0x05, 0x10),
-    foreground: Rgb(0xc8, 0xfa, 0xff),
+    foreground: Rgb(0xa0, 0xf5, 0xff),
     cursor: Rgb(0x00, 0xff, 0xff),
     cursor_text: Rgb(0x0c, 0x05, 0x1a),
     ansi: AnsiPalette {
@@ -30,7 +30,7 @@ pub const DEFAULT: ThemeConfig = ThemeConfig {
         blue: Rgb(0x44, 0x8c, 0xff),
         magenta: Rgb(0xff, 0x2b, 0xd6),
         cyan: Rgb(0x00, 0xf0, 0xff),
-        white: Rgb(0xc8, 0xfa, 0xff),
+        white: Rgb(0xa0, 0xf5, 0xff),
         bright_black: Rgb(0x5a, 0x7d, 0x8a),
         bright_red: Rgb(0xff, 0x5f, 0x8a),
         bright_green: Rgb(0x5f, 0xff, 0xd9),
