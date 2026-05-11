@@ -82,6 +82,15 @@ struct App {
     /// focus loss. (CursorLeft alone doesn't release: a drag past the
     /// edge keeps the button down.)
     mouse_left_held: bool,
+    /// A button press was forwarded to the PTY rather than starting a
+    /// native selection — set when the foreground app has mouse tracking
+    /// on and Shift isn't held at press time. Cleared on Released so
+    /// drag/motion forwarding tracks the same path the press took.
+    mouse_forwarding: bool,
+    /// Last cell forwarded to the PTY as a motion report. Used to dedup
+    /// CursorMoved events, which fire per-pixel — without this we'd spam
+    /// the app with redundant reports for the same cell.
+    last_reported_cell: Option<(u16, u16)>,
     /// Last left-click for double / triple-click detection. Same global
     /// cell within the timeout escalates Char → Word → Line; anywhere
     /// else, or after the timeout, resets to a fresh single click.
@@ -120,6 +129,8 @@ impl App {
             cursor_blink_on: true,
             cursor_blink_last_toggle: Instant::now(),
             mouse_left_held: false,
+            mouse_forwarding: false,
+            last_reported_cell: None,
             last_click: None,
         }
     }
@@ -221,19 +232,47 @@ impl App {
     }
 
     fn on_mouse_input(&mut self, state: ElementState, button: MouseButton) {
+        let Some(pos) = self.cursor_pos else { return };
+        let shift = self.modifiers.state().shift_key();
+        let tracking = self.term.mouse_proto != MouseProto::Off;
+
+        // xterm convention: when the foreground app has mouse tracking on,
+        // forward press/release to the PTY so multiplexers (zellij/tmux) and
+        // mouse-aware TUIs can do their own pane-local selection. Shift
+        // overrides to fall back to our native cross-screen selection.
+        if tracking && !shift {
+            let button_code: u32 = match button {
+                MouseButton::Left => 0,
+                MouseButton::Middle => 1,
+                MouseButton::Right => 2,
+                _ => return,
+            };
+            let Some(r) = self.renderer.as_ref() else { return };
+            let (col1, row1) = r.pixel_to_cell(pos.x, pos.y);
+            match state {
+                ElementState::Pressed => {
+                    self.send_mouse_report(button_code, true, col1, row1);
+                    if button == MouseButton::Left {
+                        self.mouse_forwarding = true;
+                        self.last_reported_cell = Some((col1, row1));
+                    }
+                }
+                ElementState::Released => {
+                    self.send_mouse_report(button_code, false, col1, row1);
+                    if button == MouseButton::Left {
+                        self.mouse_forwarding = false;
+                        self.last_reported_cell = None;
+                    }
+                }
+            }
+            return;
+        }
+
+        // Native selection path — left button only.
         if button != MouseButton::Left {
             return;
         }
-        let Some(pos) = self.cursor_pos else { return };
         let Some((line, col)) = self.cursor_to_global(pos) else { return };
-
-        // Note: when an app has mouse tracking on (zellij's DECSET 1002),
-        // xterm convention is to suppress native selection unless Shift is
-        // held. We deliberately don't apply that gate here because we
-        // don't currently forward press / release reports — gating would
-        // mean the click does nothing at all. Once click forwarding lands
-        // we should re-introduce the Shift override (and suppress selection
-        // by default) so the foreground app gets its mouse back.
 
         match state {
             ElementState::Pressed => {
@@ -282,6 +321,37 @@ impl App {
     }
 
     fn on_mouse_drag(&mut self, position: PhysicalPosition<f64>) {
+        let shift = self.modifiers.state().shift_key();
+        let tracking = self.term.mouse_proto != MouseProto::Off;
+
+        // Forward motion to the PTY when the app is tracking. Button-event
+        // mode (1002) reports drags while a button is held; Any-event (1003)
+        // reports motion regardless. CursorMoved fires per pixel, so dedup
+        // at cell granularity to avoid spamming the app.
+        if tracking && !shift {
+            let Some(r) = self.renderer.as_ref() else { return };
+            let (col1, row1) = r.pixel_to_cell(position.x, position.y);
+            if self.last_reported_cell == Some((col1, row1)) {
+                return;
+            }
+            match self.term.mouse_proto {
+                MouseProto::Button if self.mouse_forwarding => {
+                    // Drag while left button held: button 0 + motion flag (32).
+                    self.send_mouse_report(32, true, col1, row1);
+                    self.last_reported_cell = Some((col1, row1));
+                }
+                MouseProto::Any => {
+                    // Any-event tracking: report motion always. Button code
+                    // 0 with motion if left is held, 3 (none) + motion otherwise.
+                    let base = if self.mouse_forwarding { 0 } else { 3 };
+                    self.send_mouse_report(base + 32, true, col1, row1);
+                    self.last_reported_cell = Some((col1, row1));
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if !self.mouse_left_held {
             return;
         }
@@ -290,6 +360,41 @@ impl App {
         if self.term.dirty {
             self.request_redraw();
         }
+    }
+
+    /// Encode a mouse press/release/motion event as an xterm mouse report
+    /// (SGR if the app requested DECSET 1006, X10 otherwise) and write it
+    /// to the PTY. `button` is the base code — caller adds the motion flag
+    /// (+32) for drags and picks 0/1/2 for L/M/R or 64/65 for wheel. The
+    /// shift/alt/ctrl modifier bits are OR'd in here so callers don't have
+    /// to repeat the logic. `col` and `row` are 1-based xterm coords.
+    fn send_mouse_report(&self, button: u32, pressed: bool, col: u16, row: u16) {
+        let Some(pty) = &self.pty else { return };
+        let mods = self.modifiers.state();
+        let mut b = button;
+        if mods.shift_key() {
+            b |= 4;
+        }
+        if mods.alt_key() {
+            b |= 8;
+        }
+        if mods.control_key() {
+            b |= 16;
+        }
+        let mut bytes = Vec::new();
+        if self.term.mouse_sgr {
+            use std::io::Write;
+            let term = if pressed { 'M' } else { 'm' };
+            let _ = write!(&mut bytes, "\x1b[<{};{};{}{}", b, col, row, term);
+        } else {
+            // X10 releases don't carry button identity — collapse to 3.
+            let raw = if pressed { b } else { (b & !0x03) | 3 };
+            let cb = (32 + raw).min(255) as u8;
+            let cx = (32 + col as u32).min(255) as u8;
+            let cy = (32 + row as u32).min(255) as u8;
+            bytes.extend_from_slice(&[0x1b, b'[', b'M', cb, cx, cy]);
+        }
+        pty.write(&bytes);
     }
 
     /// Write `text` to the system clipboard. Errors are logged and dropped
