@@ -91,7 +91,7 @@ pub fn theme_file_path() -> Option<PathBuf> {
     Some(dir.join(format!("{name}.toml")))
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub font: FontConfig,
@@ -112,15 +112,33 @@ pub struct Config {
     /// tokenized; the temp-file path is appended as the final argument
     /// (e.g. `"code -r -w"` → `code -r -w /tmp/evelyn-buffer-….txt`).
     /// `None` falls back to `$VISUAL`, then `$EDITOR`, then `open -t`
-    /// (macOS default text-editor handler).
+    /// (macOS default text-editor handler — always external, ignoring
+    /// `editor_in_pty`).
     pub editor: Option<String>,
 
-    /// When true, the editor command is written to the focused window's
-    /// PTY as if typed at the shell prompt, so TUI editors (vi/nvim/hx/…)
-    /// run inside the current terminal instead of attaching to whichever
-    /// TTY originally spawned Evelyn. Leave false for GUI editors
-    /// (`code -r -w`, `cursor -r -w`, `open -t`, …).
+    /// When true (default), the editor command is written to the focused
+    /// window's PTY as if typed at the shell prompt, so TUI editors
+    /// (vi/nvim/hx/…) run inside the current terminal instead of attaching
+    /// to whichever TTY originally spawned Evelyn. Set false for GUI
+    /// editors (`code -r -w`, `cursor -r -w`, …) so they spawn directly
+    /// as a child process. The `open -t` fallback (no editor configured)
+    /// always uses the external path regardless of this flag.
     pub editor_in_pty: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            font: FontConfig::default(),
+            window: WindowConfig::default(),
+            shader: ShaderConfig::default(),
+            cursor: CursorConfig::default(),
+            theme: None,
+            shell: None,
+            editor: None,
+            editor_in_pty: true,
+        }
+    }
 }
 
 impl Config {

@@ -10,7 +10,7 @@ const TERM_ENV: &str = "xterm-256color";
 pub struct Pty {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    _child: Box<dyn portable_pty::Child + Send + Sync>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
 impl Pty {
@@ -73,8 +73,14 @@ impl Pty {
         Ok(Self {
             master: Arc::new(Mutex::new(pair.master)),
             writer: Arc::new(Mutex::new(writer)),
-            _child: child,
+            child,
         })
+    }
+
+    /// PID of the shell spawned on the slave side. Used to walk the
+    /// process tree to detect inner multiplexers (zellij/tmux).
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.process_id()
     }
 
     pub fn write(&self, bytes: &[u8]) {

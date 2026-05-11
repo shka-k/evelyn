@@ -3,6 +3,7 @@ mod config_watch;
 mod editor;
 mod keyboard;
 mod mouse;
+mod multiplexer;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
