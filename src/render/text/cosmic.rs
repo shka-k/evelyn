@@ -29,6 +29,12 @@ pub struct CosmicEngine {
     /// across frames; `set_text` is called every frame so old content
     /// past `runs.len()` is harmless (just not referenced).
     row_buffers: Vec<Buffer>,
+    /// Runs in the exact layout that was shaped into `row_buffers`
+    /// during the most recent `shape_runs` call — buf[i] holds the
+    /// shaped glyphs for `last_runs[i]`. `prepare` reads positions from
+    /// this so the bold-TP split (which inserts extra runs) stays
+    /// consistent between shaping and area placement.
+    last_runs: Vec<Run>,
     preedit_buffer: Buffer,
     font_size: f32,
     line_height: f32,
@@ -72,6 +78,7 @@ impl CosmicEngine {
             atlas,
             text_renderer,
             row_buffers: Vec::new(),
+            last_runs: Vec::new(),
             preedit_buffer,
             font_size,
             line_height,
@@ -152,16 +159,24 @@ impl TextEngine for CosmicEngine {
         // correctly served by STIX Two Math. Splitting Bold runs at
         // text-presentation symbols and dropping Bold on those cells
         // keeps the matcher in the Regular path, where our chain wins.
-        let split = expand_bold_text_presentation_runs(runs);
-        let runs: &[Run] = split.as_deref().unwrap_or(runs);
+        //
+        // The split rewrites the run list — extra entries get inserted
+        // wherever a Bold run mixes TP and non-TP chars — so `prepare`
+        // must read positions back from this rewritten list, not the
+        // caller's original. Cache it on the engine.
+        self.last_runs.clear();
+        match expand_bold_text_presentation_runs(runs) {
+            Some(split) => self.last_runs.extend(split),
+            None => self.last_runs.extend_from_slice(runs),
+        }
 
-        let needed = runs.len();
+        let needed = self.last_runs.len();
         while self.row_buffers.len() < needed {
             let buf = make_buffer(&mut self.font_system, self.font_size, self.line_height);
             self.row_buffers.push(buf);
         }
         let base = font_attrs();
-        for (i, run) in runs.iter().enumerate() {
+        for (i, run) in self.last_runs.iter().enumerate() {
             let buf = &mut self.row_buffers[i];
             // Unbounded width so a row run never wraps internally; a stale
             // buffer width after a window resize would otherwise cause the
@@ -199,7 +214,6 @@ impl TextEngine for CosmicEngine {
         cell_width: f32,
         line_height: f32,
         padding: f32,
-        runs: &[Run],
         preedit_origin: Option<(f32, f32)>,
     ) -> Result<()> {
         self.viewport.update(
@@ -217,7 +231,8 @@ impl TextEngine for CosmicEngine {
             bottom: surface_size.1 as i32,
         };
 
-        let mut areas: Vec<TextArea> = runs
+        let mut areas: Vec<TextArea> = self
+            .last_runs
             .iter()
             .enumerate()
             .map(|(i, run)| TextArea {

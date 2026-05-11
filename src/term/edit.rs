@@ -1,5 +1,5 @@
 use crate::color::Color;
-use crate::width::is_wide;
+use crate::width::cell_width;
 
 use super::{Cell, Term};
 use super::charset::{Charset, dec_special_graphics};
@@ -18,8 +18,21 @@ impl Term {
         } else {
             c
         };
-        let wide = is_wide(c);
-        let needed = if wide { 2 } else { 1 };
+        // Zero-width codepoints — combining marks, variation selectors
+        // (incl. VS16 `\u{FE0F}` after `⚠`, `☂`, etc.), ZWJ, and other
+        // default-ignorables — must not advance the cursor. Allocating a
+        // cell for them shifts every subsequent cell on the row one
+        // column right, which is exactly what made zellij's pane borders
+        // land in the wrong place whenever the inner pane streamed an
+        // emoji presentation sequence past us. We don't yet store
+        // combining sequences in Cell, so drop them; the previous base
+        // glyph stays put.
+        let width = cell_width(c);
+        if width == 0 {
+            return;
+        }
+        let wide = width == 2;
+        let needed = u16::from(width);
         // Consume a deferred wrap from a previous print at the right edge.
         if self.auto_wrap && self.pending_wrap {
             self.pending_wrap = false;

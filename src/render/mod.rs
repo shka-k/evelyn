@@ -246,7 +246,6 @@ impl Renderer {
             self.cell_width,
             self.line_height,
             self.padding,
-            &runs,
             preedit_origin,
         )?;
 

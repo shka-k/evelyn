@@ -82,7 +82,11 @@ pub trait TextEngine {
     fn shape_runs(&mut self, runs: &[Run], cursor_pos: Option<(u16, u16)>);
 
     /// Stage shaped glyphs into the atlas, ready for `render`. Called
-    /// once per frame after both `shape_*` calls. `preedit_origin` is the
+    /// once per frame after both `shape_*` calls. Positioning info comes
+    /// from whatever `shape_runs` last received — the engine is allowed
+    /// to mutate (split / merge) the run list internally, so the caller
+    /// must not re-pass the original `runs` here or row buffers would
+    /// fall out of sync with their (col, row). `preedit_origin` is the
     /// (left, top) where the preedit buffer should be drawn in surface
     /// pixels; `None` means no preedit this frame.
     #[allow(clippy::too_many_arguments)]
@@ -94,7 +98,6 @@ pub trait TextEngine {
         cell_width: f32,
         line_height: f32,
         padding: f32,
-        runs: &[Run],
         preedit_origin: Option<(f32, f32)>,
     ) -> Result<()>;
 
