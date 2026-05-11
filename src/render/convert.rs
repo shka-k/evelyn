@@ -1,5 +1,3 @@
-use glyphon::Color;
-
 use crate::color::Rgb;
 
 pub(super) fn clear_color_for(bg: Rgb) -> wgpu::Color {
@@ -9,10 +7,6 @@ pub(super) fn clear_color_for(bg: Rgb) -> wgpu::Color {
         b: srgb_to_linear(bg.2),
         a: 1.0,
     }
-}
-
-pub(super) fn rgb_to_color(c: Rgb) -> Color {
-    Color::rgb(c.0, c.1, c.2)
 }
 
 /// Pre-linearise sRGB color values for the quad pipeline. The wgpu surface

@@ -513,6 +513,7 @@ dependencies = [
  "sys-locale",
  "toml",
  "unicode-script",
+ "unicode-width",
  "vte",
  "wgpu",
  "winit",

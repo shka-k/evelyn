@@ -8,25 +8,22 @@ mod text;
 use std::sync::Arc;
 
 use anyhow::Result;
-use glyphon::{
-    Buffer, FontSystem, Metrics, Resolution, SwashCache, TextArea, TextAtlas, TextBounds,
-    TextRenderer, Viewport,
-};
 use wgpu::{
     CommandEncoderDescriptor, CurrentSurfaceTexture, LoadOp, Operations, RenderPassColorAttachment,
     RenderPassDescriptor, StoreOp, SurfaceConfiguration, TextureViewDescriptor,
 };
 use winit::window::Window;
 
-use crate::color::{cursor_color, cursor_text_color, default_bg, default_fg};
+use crate::color::default_bg;
 use crate::config::{CursorShape, config as live_config, resolve_shader_source};
 use crate::term::Term;
 
-use convert::{clear_color_for, rgb_to_color};
-use init::{GpuInit, TextInit, init_gpu, init_text_stack, make_buffer, measure_cell_width, metrics_for};
+use convert::clear_color_for;
+use init::{GpuInit, init_gpu, metrics_for};
 use post::PostProcessor;
 use quad::QuadPipeline;
-use text::{build_runs, cursor_cell, font_attrs};
+use text::cosmic::CosmicEngine;
+use text::{TextEngine, build_runs, cursor_cell};
 
 pub struct Renderer {
     pub window: Arc<Window>,
@@ -34,16 +31,10 @@ pub struct Renderer {
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     config: SurfaceConfiguration,
-    font_system: FontSystem,
-    swash_cache: SwashCache,
-    viewport: Viewport,
-    atlas: TextAtlas,
-    text_renderer: TextRenderer,
-    /// One Buffer per text run. Each run is a maximal stretch of cells that
-    /// can be shaped together (uniform attrs, no wide char in the middle) and
-    /// is positioned at an exact grid column. Pool grows as needed.
-    row_buffers: Vec<Buffer>,
-    preedit_buffer: Buffer,
+    /// Text shaping + rasterization. Boxed dyn so the cosmic-text impl
+    /// can be swapped for an alternative (e.g. CoreText) without
+    /// touching the Renderer.
+    engine: Box<dyn TextEngine>,
     quads: QuadPipeline,
     post: Option<PostProcessor>,
     scale: f32,
@@ -57,7 +48,6 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(window: Arc<Window>) -> Result<Self> {
-        let size = window.inner_size();
         let GpuInit {
             device,
             queue,
@@ -65,39 +55,25 @@ impl Renderer {
             config,
             format,
         } = init_gpu(&window)?;
-        let TextInit {
-            mut font_system,
-            swash_cache,
-            viewport,
-            atlas,
-            text_renderer,
-        } = init_text_stack(&device, &queue, format);
-        let quads = QuadPipeline::new(&device, format);
-        let post = resolve_shader_source().map(|src| {
-            PostProcessor::new(&device, &queue, format, config.width, config.height, &src)
-        });
 
         let scale = window.scale_factor() as f32;
         let (font_size, line_height) = metrics_for(scale);
         let padding = (live_config().window.padding * scale).round();
 
-        let row_buffers: Vec<Buffer> = Vec::new();
-        let mut preedit_buffer = make_buffer(&mut font_system, font_size, line_height);
-        preedit_buffer.set_size(
-            &mut font_system,
-            Some(size.width as f32),
-            Some(line_height * 2.0),
-        );
-        let cell_width = measure_cell_width(&mut font_system, font_size, line_height);
+        let engine = CosmicEngine::new(&device, &queue, format, font_size, line_height);
+        let cell_width = engine.cell_width();
+        let face_count = engine.font_count();
+
+        let quads = QuadPipeline::new(&device, format);
+        let post = resolve_shader_source().map(|src| {
+            PostProcessor::new(&device, &queue, format, config.width, config.height, &src)
+        });
 
         eprintln!(
             "[evelyn] surface={}x{} scale={} font={}px cell={}x{}",
             config.width, config.height, scale, font_size, cell_width, line_height
         );
-        eprintln!(
-            "[evelyn] fonts loaded: {}",
-            font_system.db().faces().count()
-        );
+        eprintln!("[evelyn] fonts loaded: {face_count}");
 
         Ok(Self {
             window,
@@ -105,13 +81,7 @@ impl Renderer {
             queue,
             surface,
             config,
-            font_system,
-            swash_cache,
-            viewport,
-            atlas,
-            text_renderer,
-            row_buffers,
-            preedit_buffer,
+            engine: Box::new(engine),
             quads,
             post,
             scale,
@@ -131,12 +101,8 @@ impl Renderer {
         self.font_size = font_size;
         self.line_height = line_height;
         self.padding = (live_config().window.padding * scale).round();
-        let m = Metrics::new(font_size, line_height);
-        for buf in &mut self.row_buffers {
-            buf.set_metrics(&mut self.font_system, m);
-        }
-        self.preedit_buffer.set_metrics(&mut self.font_system, m);
-        self.cell_width = measure_cell_width(&mut self.font_system, font_size, line_height);
+        self.engine.set_metrics(font_size, line_height);
+        self.cell_width = self.engine.cell_width();
     }
 
     /// Re-derive everything that comes from the config: font metrics, cell
@@ -152,12 +118,8 @@ impl Renderer {
         self.font_size = font_size;
         self.line_height = line_height;
         self.padding = (live_config().window.padding * self.scale).round();
-        let m = Metrics::new(font_size, line_height);
-        for buf in &mut self.row_buffers {
-            buf.set_metrics(&mut self.font_system, m);
-        }
-        self.preedit_buffer.set_metrics(&mut self.font_system, m);
-        self.cell_width = measure_cell_width(&mut self.font_system, font_size, line_height);
+        self.engine.set_metrics(font_size, line_height);
+        self.cell_width = self.engine.cell_width();
 
         // Rebuild the post-pass from scratch — config may have toggled the
         // master switch, swapped the effect, or pointed at a fresh on-disk
@@ -172,9 +134,7 @@ impl Renderer {
                 &src,
             )
         });
-        // The old atlas is keyed by the previous font/size — drop cached
-        // glyph rasters so freshly-shaped runs don't sample stale entries.
-        self.atlas.trim();
+        self.engine.trim();
 
         (self.cell_width - old_cell_w).abs() > f32::EPSILON
             || (self.line_height - old_line_h).abs() > f32::EPSILON
@@ -244,15 +204,14 @@ impl Renderer {
         // writing an inverted cell (Claude Code, helix in some modes) leaves
         // that cell visible behind the preedit — preedit glyphs have gaps
         // and don't fully cover the cell underneath.
-        let base = font_attrs();
         let has_preedit = !preedit.is_empty();
-        let (preedit_w, preedit_caret_x) = if has_preedit {
-            self.shape_preedit(preedit, preedit_cursor, base.clone())
+        let preedit_metrics = if has_preedit {
+            self.engine.shape_preedit(preedit, preedit_cursor)
         } else {
-            (0.0, 0.0)
+            text::PreeditMetrics::default()
         };
         let preedit_mask = if has_preedit {
-            let span = ((preedit_w / self.cell_width).ceil() as u16).max(1);
+            let span = ((preedit_metrics.width / self.cell_width).ceil() as u16).max(1);
             let end = term.cur_x.saturating_add(span).min(term.cols);
             Some((term.cur_y, term.cur_x, end))
         } else {
@@ -264,72 +223,31 @@ impl Renderer {
         // can't drift the layout. Only the *focused* block shape inverts
         // the cell character; the unfocused outline sits around the glyph
         // so the regular foreground stays correct, same as bar/underline.
-        let cursor_override = if show_cursor && focused && cursor_shape == CursorShape::Block {
-            Some((
-                term.cur_x,
-                term.cur_y,
-                base.clone().color(rgb_to_color(cursor_text_color())),
-            ))
+        let cursor_pos = if show_cursor && focused && cursor_shape == CursorShape::Block {
+            Some((term.cur_x, term.cur_y))
         } else {
             None
         };
-        let runs = build_runs(term, base.clone(), cursor_override, preedit_mask);
-        self.shape_runs(&runs);
-
-        self.viewport.update(
-            &self.queue,
-            Resolution {
-                width: self.config.width,
-                height: self.config.height,
-            },
-        );
+        let runs = build_runs(term, cursor_pos, preedit_mask);
+        self.engine.shape_runs(&runs, cursor_pos);
 
         let pre_left = term.cur_x as f32 * self.cell_width + self.padding;
         let pre_top = term.cur_y as f32 * self.line_height + self.padding;
 
-        let bounds = TextBounds {
-            left: 0,
-            top: 0,
-            right: self.config.width as i32,
-            bottom: self.config.height as i32,
+        let preedit_origin = if has_preedit {
+            Some((pre_left, pre_top))
+        } else {
+            None
         };
-        // Row TextAreas: one per run, positioned at exact grid column.
-        let cell_width = self.cell_width;
-        let line_height = self.line_height;
-        let padding = self.padding;
-        let mut areas: Vec<TextArea> = runs
-            .iter()
-            .enumerate()
-            .map(|(i, run)| TextArea {
-                buffer: &self.row_buffers[i],
-                left: run.col as f32 * cell_width + padding,
-                top: run.row as f32 * line_height + padding,
-                scale: 1.0,
-                bounds,
-                default_color: rgb_to_color(default_fg()),
-                custom_glyphs: &[],
-            })
-            .collect();
-        if has_preedit {
-            areas.push(TextArea {
-                buffer: &self.preedit_buffer,
-                left: pre_left,
-                top: pre_top,
-                scale: 1.0,
-                bounds,
-                default_color: rgb_to_color(cursor_color()),
-                custom_glyphs: &[],
-            });
-        }
-
-        self.text_renderer.prepare(
+        self.engine.prepare(
             &self.device,
             &self.queue,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            areas,
-            &mut self.swash_cache,
+            (self.config.width, self.config.height),
+            self.cell_width,
+            self.line_height,
+            self.padding,
+            &runs,
+            preedit_origin,
         )?;
 
         let Some(frame) = self.acquire_frame() else {
@@ -339,8 +257,8 @@ impl Renderer {
         let overlay = self.overlay_quads(
             term,
             has_preedit,
-            preedit_w,
-            preedit_caret_x,
+            preedit_metrics.width,
+            preedit_metrics.caret_x,
             show_cursor,
             cursor_wide,
             cursor_shape,
@@ -400,8 +318,7 @@ impl Renderer {
                 self.config.height as f32,
                 &quads,
             );
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)?;
+            self.engine.render(&mut pass)?;
         }
 
         if let Some(post) = self.post.as_mut() {
@@ -411,7 +328,7 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         self.window.pre_present_notify();
         frame.present();
-        self.atlas.trim();
+        self.engine.trim();
         Ok(())
     }
 

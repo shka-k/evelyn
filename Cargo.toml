@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 sys-locale = "0.3"
 toml = "0.8"
 unicode-script = "0.5"
+unicode-width = "0.2"
 vte = "0.15"
 wgpu = "29"
 winit = "0.30"
