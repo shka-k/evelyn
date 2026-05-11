@@ -111,7 +111,9 @@ red   = "#f7768e"
 | `Cmd+W`   | Quit                                         |
 
 Drag with the left mouse button to select; the selection is also copied
-to the system clipboard on release.
+to the system clipboard on release. Inside an app that's tracking the
+mouse (zellij, tmux, vim, …), drag is forwarded to the app — hold
+**Shift** while dragging to bypass and select natively instead.
 
 ## Layout
 
