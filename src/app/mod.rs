@@ -216,6 +216,9 @@ fn sync_grid(&mut self) {
                 p.write(&reply);
             }
         }
+        if let Some(text) = self.term.pending_clipboard.take() {
+            self.copy_to_clipboard(&text);
+        }
         if self.term.dirty {
             self.request_redraw();
         }

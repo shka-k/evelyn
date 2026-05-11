@@ -64,6 +64,23 @@ impl Perform for Term {
         let Some(num_bytes) = params.first() else { return };
         let Ok(num_str) = std::str::from_utf8(num_bytes) else { return };
         let Ok(base) = num_str.parse::<u32>() else { return };
+        // OSC 52 — clipboard set/query. Format is `OSC 52 ; <sel> ; <data> ST`
+        // where <sel> is any combo of c/p/s/q/0-7 (we treat them all as the
+        // single macOS pasteboard) and <data> is base64-encoded text, or `?`
+        // to read. Queries are intentionally ignored — replying would let
+        // any process inside the terminal exfiltrate clipboard contents,
+        // and zellij/tmux only need the write half for their copy actions.
+        if base == 52 {
+            if let Some(&payload) = params.get(2)
+                && payload != b"?"
+                && let Some(decoded) = base64_decode(payload)
+                && let Ok(text) = std::str::from_utf8(&decoded)
+                && !text.is_empty()
+            {
+                self.pending_clipboard = Some(text.to_string());
+            }
+            return;
+        }
         if !(10..=12).contains(&base) {
             return;
         }
@@ -256,6 +273,38 @@ impl Term {
             _ => {}
         }
     }
+}
+
+/// Decode standard base64 (RFC 4648 alphabet, padding optional). Returns
+/// `None` on any non-alphabet byte; whitespace and `=` padding are ignored.
+/// Inlined to avoid pulling a base64 crate just for OSC 52 — payloads here
+/// are short (a copied selection) and the standard alphabet is the only
+/// one specified by the OSC 52 spec.
+fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+    for &b in input {
+        if b == b'=' || b.is_ascii_whitespace() {
+            continue;
+        }
+        let v: u32 = match b {
+            b'A'..=b'Z' => (b - b'A') as u32,
+            b'a'..=b'z' => (b - b'a' + 26) as u32,
+            b'0'..=b'9' => (b - b'0' + 52) as u32,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1u32 << bits) - 1;
+        }
+    }
+    Some(out)
 }
 
 fn first_param(params: &Params, default: u16) -> u16 {

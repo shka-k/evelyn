@@ -83,6 +83,13 @@ pending_wrap: bool,
     /// Bytes the terminal needs to send back to the host program (DA, DSR, …).
     /// Drained by the application after each parser advance.
     pub replies: Vec<u8>,
+    /// Clipboard payload the running app asked us to set via OSC 52
+    /// (`\e]52;<sel>;<base64>\e\\`). Drained by the application after each
+    /// parser advance and pushed to the system clipboard. zellij/tmux/vim
+    /// all use this for their own copy actions when running under a
+    /// terminal that supports it — without honoring it, a copy inside
+    /// zellij silently no-ops.
+    pub pending_clipboard: Option<String>,
     /// DECSTBM scroll region — top/bottom row indices, inclusive, in [0, rows).
     /// Default covers the whole screen. Apps like zellij set per-pane regions
     /// so an LF at the pane bottom only scrolls that band, not the whole grid.
@@ -145,6 +152,7 @@ impl Term {
             bracketed_paste: false,
             pending_wrap: false,
             replies: Vec::new(),
+            pending_clipboard: None,
             scroll_top: 0,
             scroll_bot: rows.saturating_sub(1),
             saved_cursor: None,
