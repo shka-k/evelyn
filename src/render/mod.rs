@@ -242,12 +242,32 @@ impl Renderer {
         };
         let cursor_shape = live_config().cursor.shape;
 
+        // Preedit shaping comes first so we know how many cells it spans;
+        // those cells are then masked out of the grid runs and SGR bg quads
+        // below. Without the mask, an app that draws its own cursor by
+        // writing an inverted cell (Claude Code, helix in some modes) leaves
+        // that cell visible behind the preedit — preedit glyphs have gaps
+        // and don't fully cover the cell underneath.
+        let base = font_attrs();
+        let has_preedit = !preedit.is_empty();
+        let (preedit_w, preedit_caret_x) = if has_preedit {
+            self.shape_preedit(preedit, preedit_cursor, base.clone())
+        } else {
+            (0.0, 0.0)
+        };
+        let preedit_mask = if has_preedit {
+            let span = ((preedit_w / self.cell_width).ceil() as u16).max(1);
+            let end = term.cur_x.saturating_add(span).min(term.cols);
+            Some((term.cur_y, term.cur_x, end))
+        } else {
+            None
+        };
+
         // Build grid runs and shape each into a dedicated row buffer. This
         // keeps every run pinned to its grid column so font fallback widths
         // can't drift the layout. Only the *focused* block shape inverts
         // the cell character; the unfocused outline sits around the glyph
         // so the regular foreground stays correct, same as bar/underline.
-        let base = font_attrs();
         let cursor_override = if show_cursor && focused && cursor_shape == CursorShape::Block {
             Some((
                 term.cur_x,
@@ -257,16 +277,8 @@ impl Renderer {
         } else {
             None
         };
-        let runs = build_runs(term, base.clone(), cursor_override);
+        let runs = build_runs(term, base.clone(), cursor_override, preedit_mask);
         self.shape_runs(&runs);
-
-        // Preedit
-        let has_preedit = !preedit.is_empty();
-        let (preedit_w, preedit_caret_x) = if has_preedit {
-            self.shape_preedit(preedit, preedit_cursor, base.clone())
-        } else {
-            (0.0, 0.0)
-        };
 
         self.viewport.update(
             &self.queue,
@@ -381,7 +393,7 @@ impl Renderer {
             // between bg and cursor so an active drag still shows the
             // cursor block, and is alpha-blended so colored cell bgs
             // remain readable underneath.
-            let mut quads = self.build_bg_quads(term, screen_bg);
+            let mut quads = self.build_bg_quads(term, screen_bg, preedit_mask);
             quads.extend_from_slice(&self.build_selection_quads(term));
             quads.extend_from_slice(&overlay);
             self.quads.draw(
@@ -623,15 +635,31 @@ impl Renderer {
     /// `screen_bg` are skipped because the surface clear already paints
     /// them — and `screen_bg` is whatever we cleared the cell pass with,
     /// not necessarily the theme default.
-    fn build_bg_quads(&self, term: &Term, screen_bg: Rgb) -> Vec<Rect> {
+    fn build_bg_quads(
+        &self,
+        term: &Term,
+        screen_bg: Rgb,
+        mask: Option<(u16, u16, u16)>,
+    ) -> Vec<Rect> {
         let cols = term.cols as usize;
         let mut quads = Vec::new();
         for y in 0..term.rows {
             let mut x: usize = 0;
             while x < cols {
+                if let Some((my, ms, me)) = mask {
+                    if y == my && (x as u16) >= ms && (x as u16) < me {
+                        x += 1;
+                        continue;
+                    }
+                }
                 let bg = term.cell_at(x as u16, y).bg_eff();
                 let mut end = x + 1;
                 while end < cols && term.cell_at(end as u16, y).bg_eff() == bg {
+                    if let Some((my, ms, me)) = mask {
+                        if y == my && (end as u16) >= ms && (end as u16) < me {
+                            break;
+                        }
+                    }
                     end += 1;
                 }
                 if bg != screen_bg {
@@ -675,6 +703,7 @@ fn build_runs(
     term: &Term,
     base: Attrs<'static>,
     cursor_override: Option<(u16, u16, Attrs<'static>)>,
+    mask: Option<(u16, u16, u16)>,
 ) -> Vec<Run> {
     let mut runs = Vec::new();
 
@@ -687,6 +716,23 @@ fn build_runs(
             let cell = term.cell_at(x, y);
             if cell.ch == '\0' {
                 continue; // wide-char continuation
+            }
+            // Cells under the IME preedit are dropped so any app-drawn
+            // cursor (inverted cell from helix, Claude Code, etc.) sitting
+            // on the cursor row doesn't bleed through the preedit glyphs.
+            let masked = mask
+                .map(|(my, ms, me)| y == my && x >= ms && x < me)
+                .unwrap_or(false);
+            if masked {
+                if !run_text.is_empty() {
+                    runs.push(Run {
+                        col: run_col,
+                        row: y,
+                        text: std::mem::take(&mut run_text),
+                        attrs: run_attrs.clone(),
+                    });
+                }
+                continue;
             }
             let is_cursor = cursor_override
                 .as_ref()
