@@ -2,7 +2,8 @@
 //! any filesystem IO. Pick one with `theme = "<name>"` in `config.toml`.
 
 use crate::color::Rgb;
-use crate::config::{AnsiPalette, ThemeConfig};
+
+use super::super::theme::{AnsiPalette, ThemeConfig};
 
 pub const BUILTIN_THEMES: &[(&str, ThemeConfig)] = &[
     ("default", DEFAULT),

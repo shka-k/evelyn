@@ -6,27 +6,23 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use glyphon::{
-    cosmic_text::{FeatureTag, FontFeatures},
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
     TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
+    cosmic_text::{FeatureTag, FontFeatures},
 };
 use wgpu::{
-    CommandEncoderDescriptor, CurrentSurfaceTexture, LoadOp, Operations,
-    RenderPassColorAttachment, RenderPassDescriptor, StoreOp, SurfaceConfiguration,
-    TextureViewDescriptor,
+    CommandEncoderDescriptor, CurrentSurfaceTexture, LoadOp, Operations, RenderPassColorAttachment,
+    RenderPassDescriptor, StoreOp, SurfaceConfiguration, TextureViewDescriptor,
 };
 use winit::window::Window;
 
-use std::borrow::Cow;
-use std::path::PathBuf;
-
-use crate::color::{cursor_color, cursor_text_color, default_bg, default_fg, Rgb};
-use crate::config::{config as live_config, CursorShape};
+use crate::color::{Rgb, cursor_color, cursor_text_color, default_bg, default_fg};
+use crate::config::{CursorShape, config as live_config, resolve_shader_source};
 use crate::term::Term;
 
 use init::{
-    init_gpu, init_text_stack, make_buffer, measure_cell_width, metrics_for, GpuInit, TextInit,
-    BUNDLED_FONT_NAME,
+    BUNDLED_FONT_NAME, GpuInit, TextInit, init_gpu, init_text_stack, make_buffer,
+    measure_cell_width, metrics_for,
 };
 use post::PostProcessor;
 use quad::{QuadPipeline, Rect};
@@ -71,7 +67,13 @@ struct Run {
 impl Renderer {
     pub fn new(window: Arc<Window>) -> Result<Self> {
         let size = window.inner_size();
-        let GpuInit { device, queue, surface, config, format } = init_gpu(&window)?;
+        let GpuInit {
+            device,
+            queue,
+            surface,
+            config,
+            format,
+        } = init_gpu(&window)?;
         let TextInit {
             mut font_system,
             swash_cache,
@@ -193,7 +195,12 @@ impl Renderer {
         self.config.height = h.max(1);
         self.surface.configure(&self.device, &self.config);
         if let Some(post) = self.post.as_mut() {
-            post.resize(&self.device, &self.queue, self.config.width, self.config.height);
+            post.resize(
+                &self.device,
+                &self.queue,
+                self.config.width,
+                self.config.height,
+            );
         }
     }
 
@@ -231,10 +238,8 @@ impl Renderer {
         // (cur_x, cur_y) position refers to the live screen and would
         // paint at the wrong row inside the historical view. Also gate
         // on the blink phase so a configured blink can hide it.
-        let show_cursor = preedit.is_empty()
-            && term.cursor_visible
-            && term.view_offset == 0
-            && blink_on;
+        let show_cursor =
+            preedit.is_empty() && term.cursor_visible && term.view_offset == 0 && blink_on;
         let cursor_wide = if show_cursor {
             cursor_cell(term).map(|(_, w)| w).unwrap_or(false)
         } else {
@@ -336,10 +341,10 @@ impl Renderer {
             &mut self.swash_cache,
         )?;
 
-        let Some(frame) = self.acquire_frame() else { return Ok(()); };
-        let surface_view = frame
-            .texture
-            .create_view(&TextureViewDescriptor::default());
+        let Some(frame) = self.acquire_frame() else {
+            return Ok(());
+        };
+        let surface_view = frame.texture.create_view(&TextureViewDescriptor::default());
         let overlay = self.overlay_quads(
             term,
             has_preedit,
@@ -576,7 +581,13 @@ impl Renderer {
                 color,
             }],
             CursorShape::Hollow => vec![
-                Rect { x, y, w: cell_w, h: stripe, color },
+                Rect {
+                    x,
+                    y,
+                    w: cell_w,
+                    h: stripe,
+                    color,
+                },
                 Rect {
                     x,
                     y: y + self.line_height - stripe,
@@ -584,7 +595,13 @@ impl Renderer {
                     h: stripe,
                     color,
                 },
-                Rect { x, y, w: stripe, h: self.line_height, color },
+                Rect {
+                    x,
+                    y,
+                    w: stripe,
+                    h: self.line_height,
+                    color,
+                },
                 Rect {
                     x: x + cell_w - stripe,
                     y,
@@ -804,10 +821,13 @@ fn cursor_cell(term: &Term) -> Option<(char, bool)> {
     if cell.ch == '\0' {
         return None; // landed on a wide-char continuation, suppress
     }
-    let ch = if cell.ch.is_whitespace() { ' ' } else { cell.ch };
+    let ch = if cell.ch.is_whitespace() {
+        ' '
+    } else {
+        cell.ch
+    };
     Some((ch, cell.wide))
 }
-
 
 fn attrs_for_cell<'a>(base: Attrs<'a>, fg: Rgb, bold: bool) -> Attrs<'a> {
     let mut a = base.color(rgb_to_color(fg));
@@ -846,62 +866,6 @@ fn rgb_to_rgba(c: Rgb, a: f32) -> [f32; 4] {
         srgb_to_linear(c.2) as f32,
         a,
     ]
-}
-
-/// Resolve the WGSL source for the configured post-processing effect.
-/// `"none"` (or `enabled = false`) → no post pass. Built-ins resolve at
-/// compile time. Anything else is read from `~/.config/evelyn/shaders/`.
-fn resolve_shader_source() -> Option<Cow<'static, str>> {
-    let cfg = live_config();
-    let name = cfg.shader.effect_name();
-    if name == "none" {
-        return None;
-    }
-    if let Some(src) = builtin_shader_source(name) {
-        eprintln!("[evelyn] loaded shader: {name} (built-in)");
-        return Some(Cow::Borrowed(src));
-    }
-    let path = match user_shader_path(name) {
-        Some(p) => p,
-        None => {
-            eprintln!("[evelyn] $HOME unset; cannot resolve shader {name:?}");
-            return None;
-        }
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(src) => {
-            eprintln!("[evelyn] loaded shader: {name} ({})", path.display());
-            Some(Cow::Owned(src))
-        }
-        Err(e) => {
-            eprintln!("[evelyn] shader {name:?} load failed: {e}");
-            None
-        }
-    }
-}
-
-fn builtin_shader_source(name: &str) -> Option<&'static str> {
-    match name {
-        "newpixie-crt" => Some(include_str!("shaders/newpixie_crt.wgsl")),
-        _ => None,
-    }
-}
-
-fn user_shader_path(name: &str) -> Option<PathBuf> {
-    let dir = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            PathBuf::from(xdg).join("evelyn/shaders")
-        } else {
-            PathBuf::from(std::env::var("HOME").ok()?).join(".config/evelyn/shaders")
-        }
-    } else {
-        PathBuf::from(std::env::var("HOME").ok()?).join(".config/evelyn/shaders")
-    };
-    Some(if name.ends_with(".wgsl") {
-        dir.join(name)
-    } else {
-        dir.join(format!("{name}.wgsl"))
-    })
 }
 
 fn font_attrs() -> Attrs<'static> {
