@@ -297,14 +297,13 @@ fn sgr(term: &mut Term, params: &Params) {
                             if p == 38 { term.fg = c; } else { term.bg = c; }
                             i += 2;
                         }
-                    } else if kind == 2 {
-                        if let (Some(&r), Some(&g), Some(&b)) =
+                    } else if kind == 2
+                        && let (Some(&r), Some(&g), Some(&b)) =
                             (flat.get(i + 2), flat.get(i + 3), flat.get(i + 4))
-                        {
-                            let c = Color::Rgb(Rgb(r as u8, g as u8, b as u8));
-                            if p == 38 { term.fg = c; } else { term.bg = c; }
-                            i += 4;
-                        }
+                    {
+                        let c = Color::Rgb(Rgb(r as u8, g as u8, b as u8));
+                        if p == 38 { term.fg = c; } else { term.bg = c; }
+                        i += 4;
                     }
                 }
             }

@@ -663,19 +663,23 @@ impl Renderer {
         for y in 0..term.rows {
             let mut x: usize = 0;
             while x < cols {
-                if let Some((my, ms, me)) = mask {
-                    if y == my && (x as u16) >= ms && (x as u16) < me {
-                        x += 1;
-                        continue;
-                    }
+                if let Some((my, ms, me)) = mask
+                    && y == my
+                    && (x as u16) >= ms
+                    && (x as u16) < me
+                {
+                    x += 1;
+                    continue;
                 }
                 let bg = term.cell_at(x as u16, y).bg_eff();
                 let mut end = x + 1;
                 while end < cols && term.cell_at(end as u16, y).bg_eff() == bg {
-                    if let Some((my, ms, me)) = mask {
-                        if y == my && (end as u16) >= ms && (end as u16) < me {
-                            break;
-                        }
+                    if let Some((my, ms, me)) = mask
+                        && y == my
+                        && (end as u16) >= ms
+                        && (end as u16) < me
+                    {
+                        break;
                     }
                     end += 1;
                 }

@@ -120,15 +120,15 @@ impl Config {
 }
 
 fn config_path() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("EVELYN_CONFIG") {
-        if !p.is_empty() {
-            return Some(PathBuf::from(p));
-        }
+    if let Ok(p) = std::env::var("EVELYN_CONFIG")
+        && !p.is_empty()
+    {
+        return Some(PathBuf::from(p));
     }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("evelyn/config.toml"));
-        }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("evelyn/config.toml"));
     }
     let home = std::env::var("HOME").ok()?;
     Some(PathBuf::from(home).join(".config/evelyn/config.toml"))

@@ -314,15 +314,14 @@ impl App {
                 // A drag that produced any text → clipboard. A bare click
                 // (anchor == head) is a deselect signal: clear so the
                 // highlight goes away.
-                if let Some(sel) = self.term.selection {
-                    if sel.anchor_line == sel.head_line
-                        && sel.anchor_col == sel.head_col
-                        && sel.mode == SelectionMode::Char
-                    {
-                        self.term.clear_selection();
-                        self.request_redraw();
-                        return;
-                    }
+                if let Some(sel) = self.term.selection
+                    && sel.anchor_line == sel.head_line
+                    && sel.anchor_col == sel.head_col
+                    && sel.mode == SelectionMode::Char
+                {
+                    self.term.clear_selection();
+                    self.request_redraw();
+                    return;
                 }
                 if let Some(text) = self.term.extract_selection_text() {
                     self.copy_to_clipboard(&text);
@@ -536,10 +535,10 @@ impl App {
             Ime::Commit(text) => {
                 self.preedit.clear();
                 self.preedit_cursor = 0;
-                if !text.is_empty() {
-                    if let Some(p) = &self.pty {
-                        p.write(text.as_bytes());
-                    }
+                if !text.is_empty()
+                    && let Some(p) = &self.pty
+                {
+                    p.write(text.as_bytes());
                 }
             }
         }

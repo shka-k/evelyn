@@ -148,10 +148,10 @@ pub(super) fn lookup_builtin_theme(name: &str) -> Option<ThemeConfig> {
 }
 
 pub(super) fn themes_dir() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("evelyn/themes"));
-        }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("evelyn/themes"));
     }
     let home = std::env::var("HOME").ok()?;
     Some(PathBuf::from(home).join(".config/evelyn/themes"))

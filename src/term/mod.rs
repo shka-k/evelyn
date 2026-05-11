@@ -911,12 +911,12 @@ impl Term {
     }
 
     pub fn update_selection(&mut self, line: usize, col: u16) {
-        if let Some(sel) = self.selection.as_mut() {
-            if sel.head_line != line || sel.head_col != col {
-                sel.head_line = line;
-                sel.head_col = col;
-                self.dirty = true;
-            }
+        if let Some(sel) = self.selection.as_mut()
+            && (sel.head_line != line || sel.head_col != col)
+        {
+            sel.head_line = line;
+            sel.head_col = col;
+            self.dirty = true;
         }
     }
 
@@ -960,10 +960,10 @@ impl Term {
             let mut line_text = String::new();
             let mut col = from;
             while col < to {
-                if let Some(cell) = self.cell_at_global(line, col) {
-                    if cell.ch != '\0' {
-                        line_text.push(cell.ch);
-                    }
+                if let Some(cell) = self.cell_at_global(line, col)
+                    && cell.ch != '\0'
+                {
+                    line_text.push(cell.ch);
                 }
                 col += 1;
             }
