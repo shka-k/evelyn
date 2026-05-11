@@ -95,6 +95,11 @@ struct App {
     /// cell within the timeout escalates Char → Word → Line; anywhere
     /// else, or after the timeout, resets to a fresh single click.
     last_click: Option<ClickRecord>,
+    /// Window focus state. While `false` we skip rendering and don't arm
+    /// blink wakeups so a backgrounded window stops drawing the CPU/GPU.
+    /// PTY parsing keeps running so the grid is up to date when focus
+    /// returns; a single redraw on re-focus catches up the screen.
+    focused: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -132,6 +137,7 @@ impl App {
             mouse_forwarding: false,
             last_reported_cell: None,
             last_click: None,
+            focused: true,
         }
     }
 
@@ -527,6 +533,12 @@ impl App {
     }
 
     fn on_redraw(&mut self) {
+        // Backgrounded windows skip the draw entirely — the OS keeps showing
+        // the last presented frame, and we'll repaint on re-focus. `dirty`
+        // is intentionally left set so the catch-up redraw still happens.
+        if !self.focused {
+            return;
+        }
         if let Some(r) = self.renderer.as_mut() {
             // When blink is disabled in config, blink_on is held at true so
             // the cursor stays visible regardless of phase state.
@@ -675,6 +687,21 @@ impl App {
         }
     }
 
+    /// Track window focus. While unfocused we skip draws and blink wakeups;
+    /// on re-focus we reset the blink phase and request a redraw so any PTY
+    /// activity that arrived while backgrounded gets painted in one shot.
+    /// Losing focus also releases a held left button so a drag interrupted
+    /// by an OS-level focus switch doesn't leave us stuck in drag state.
+    fn on_focus_change(&mut self, focused: bool) {
+        self.focused = focused;
+        if focused {
+            self.poke_cursor_blink();
+            self.request_redraw();
+        } else {
+            self.mouse_left_held = false;
+        }
+    }
+
     fn on_pty_data(&mut self, bytes: Vec<u8>) {
         self.parser.advance(&mut self.term, &bytes);
         if !self.term.replies.is_empty() {
@@ -684,7 +711,6 @@ impl App {
             }
         }
         if self.term.dirty {
-            self.poke_cursor_blink();
             self.request_redraw();
         }
     }
@@ -821,6 +847,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.on_mouse_drag(position);
             }
             WindowEvent::CursorLeft { .. } => self.cursor_pos = None,
+            WindowEvent::Focused(focused) => self.on_focus_change(focused),
             WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::RedrawRequested => self.on_redraw(),
             _ => {}
@@ -834,6 +861,14 @@ impl ApplicationHandler<UserEvent> for App {
     /// so the wakeup rate matches the configured rate exactly.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let cfg = config();
+        // Backgrounded → no blink wakeups. Hold the phase at "on" so the
+        // cursor doesn't appear in some random half-state when focus
+        // returns; the re-focus path resets the toggle clock.
+        if !self.focused {
+            self.cursor_blink_on = true;
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
         if !cfg.cursor.blink {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
