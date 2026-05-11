@@ -104,6 +104,10 @@ pub enum CursorShape {
     /// Thin vertical bar at the cell's left edge (I-beam) — does not
     /// invert the underlying character.
     Bar,
+    /// Hollow rectangle around the cell (4 thin edges). Same look the
+    /// renderer uses for an unfocused Block — pick this when you want
+    /// that style as the *default* shape regardless of focus.
+    Hollow,
 }
 
 #[derive(Clone, Debug, Deserialize)]

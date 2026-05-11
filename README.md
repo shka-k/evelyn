@@ -18,7 +18,7 @@ and an Alacritty-compatible theme schema.
 - **Ligatures** via OpenType `liga` / `clig` / `calt` / `dlig` (configurable).
 - **Mouse selection** with drag-to-select and auto-copy / Cmd+C.
 - **Bracketed paste** on Cmd+V (paste-end markers in the payload are stripped).
-- **Configurable cursor** — block / underline / bar, optional blink.
+- **Configurable cursor** — block / underline / bar / hollow, optional blink.
 - **xterm-compatible key encoding** including DECCKM, modifier codes for
   cursor / nav / F-keys, and Cmd folded into Alt as a meta modifier.
 
@@ -67,7 +67,7 @@ enabled = true
 effect = "newpixie-crt"      # built-in or filename under shaders/
 
 [cursor]
-shape = "block"              # "block" | "underline" | "bar"
+shape = "block"              # "block" | "underline" | "bar" | "hollow"
 blink = false
 blink_interval_ms = 530
 ```

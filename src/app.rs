@@ -95,10 +95,10 @@ struct App {
     /// cell within the timeout escalates Char → Word → Line; anywhere
     /// else, or after the timeout, resets to a fresh single click.
     last_click: Option<ClickRecord>,
-    /// Window focus state. While `false` we skip rendering and don't arm
-    /// blink wakeups so a backgrounded window stops drawing the CPU/GPU.
-    /// PTY parsing keeps running so the grid is up to date when focus
-    /// returns; a single redraw on re-focus catches up the screen.
+    /// Window focus state. While `false` we don't arm blink wakeups (the
+    /// cursor holds at "on" and the renderer paints it as a hollow
+    /// outline so it's still locatable). Rendering itself keeps running
+    /// — a TUI scrolling logs in the background should still update.
     focused: bool,
 }
 
@@ -533,17 +533,14 @@ impl App {
     }
 
     fn on_redraw(&mut self) {
-        // Backgrounded windows skip the draw entirely — the OS keeps showing
-        // the last presented frame, and we'll repaint on re-focus. `dirty`
-        // is intentionally left set so the catch-up redraw still happens.
-        if !self.focused {
-            return;
-        }
         if let Some(r) = self.renderer.as_mut() {
             // When blink is disabled in config, blink_on is held at true so
-            // the cursor stays visible regardless of phase state.
+            // the cursor stays visible regardless of phase state. While
+            // unfocused we also pin blink_on (see `about_to_wait`) so the
+            // cursor is always visible — just rendered hollow instead of
+            // solid by the renderer.
             let blink_on = !config().cursor.blink || self.cursor_blink_on;
-            if let Err(e) = r.render(&self.term, &self.preedit, blink_on) {
+            if let Err(e) = r.render(&self.term, &self.preedit, blink_on, self.focused) {
                 eprintln!("render error: {e}");
             }
             self.term.dirty = false;

@@ -219,7 +219,13 @@ impl Renderer {
         (cx + 1, cy + 1)
     }
 
-    pub fn render(&mut self, term: &Term, preedit: &str, blink_on: bool) -> Result<()> {
+    pub fn render(
+        &mut self,
+        term: &Term,
+        preedit: &str,
+        blink_on: bool,
+        focused: bool,
+    ) -> Result<()> {
         // Hide the cursor while the user is browsing scrollback — the
         // (cur_x, cur_y) position refers to the live screen and would
         // paint at the wrong row inside the historical view. Also gate
@@ -237,11 +243,11 @@ impl Renderer {
 
         // Build grid runs and shape each into a dedicated row buffer. This
         // keeps every run pinned to its grid column so font fallback widths
-        // can't drift the layout. Only the block shape inverts the cell
-        // character; bar/underline sit alongside the glyph so the regular
-        // foreground stays correct.
+        // can't drift the layout. Only the *focused* block shape inverts
+        // the cell character; the unfocused outline sits around the glyph
+        // so the regular foreground stays correct, same as bar/underline.
         let base = font_attrs();
-        let cursor_override = if show_cursor && cursor_shape == CursorShape::Block {
+        let cursor_override = if show_cursor && focused && cursor_shape == CursorShape::Block {
             Some((
                 term.cur_x,
                 term.cur_y,
@@ -328,6 +334,7 @@ impl Renderer {
             show_cursor,
             cursor_wide,
             cursor_shape,
+            focused,
             pre_left,
             pre_top,
         );
@@ -457,6 +464,7 @@ impl Renderer {
         show_cursor: bool,
         cursor_wide: bool,
         cursor_shape: CursorShape,
+        focused: bool,
         pre_left: f32,
         pre_top: f32,
     ) -> Vec<Rect> {
@@ -481,34 +489,62 @@ impl Renderer {
         };
         let x = term.cur_x as f32 * self.cell_width + self.padding;
         let y = term.cur_y as f32 * self.line_height + self.padding;
-        // Stripe thickness for bar/underline — 2pt scaled to physical
-        // pixels with a 1px floor so it never disappears at low DPI.
+        // Stripe thickness for bar/underline + the unfocused-block outline
+        // — 2pt scaled to physical pixels with a 1px floor so it never
+        // disappears at low DPI.
         let stripe = (2.0 * self.scale).round().max(1.0);
         let color = rgb_to_rgba(cursor_color(), 1.0);
-        let rect = match cursor_shape {
-            CursorShape::Block => Rect {
+        // Unfocused Block downgrades to Hollow so the user can still
+        // see *where* the cursor is without it competing with the
+        // foreground app's own focus indicators. Bar/Underline are
+        // already thin lines — they read fine without a filled glyph
+        // behind them, so they stay as-is.
+        let effective_shape = if !focused && cursor_shape == CursorShape::Block {
+            CursorShape::Hollow
+        } else {
+            cursor_shape
+        };
+        match effective_shape {
+            CursorShape::Block => vec![Rect {
                 x,
                 y,
                 w: cell_w,
                 h: self.line_height,
                 color,
-            },
-            CursorShape::Underline => Rect {
+            }],
+            CursorShape::Underline => vec![Rect {
                 x,
                 y: y + self.line_height - stripe,
                 w: cell_w,
                 h: stripe,
                 color,
-            },
-            CursorShape::Bar => Rect {
+            }],
+            CursorShape::Bar => vec![Rect {
                 x,
                 y,
                 w: stripe,
                 h: self.line_height,
                 color,
-            },
-        };
-        vec![rect]
+            }],
+            CursorShape::Hollow => vec![
+                Rect { x, y, w: cell_w, h: stripe, color },
+                Rect {
+                    x,
+                    y: y + self.line_height - stripe,
+                    w: cell_w,
+                    h: stripe,
+                    color,
+                },
+                Rect { x, y, w: stripe, h: self.line_height, color },
+                Rect {
+                    x: x + cell_w - stripe,
+                    y,
+                    w: stripe,
+                    h: self.line_height,
+                    color,
+                },
+            ],
+        }
     }
 
     /// One alpha-blended rect per maximal run of selected cells in each
