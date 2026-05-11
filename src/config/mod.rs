@@ -107,6 +107,20 @@ pub struct Config {
 
     /// Override the shell to spawn. `None` uses `$SHELL`, then `/bin/bash`.
     pub shell: Option<String>,
+
+    /// Command launched by Cmd+E to view the buffer dump. Whitespace-
+    /// tokenized; the temp-file path is appended as the final argument
+    /// (e.g. `"code -r -w"` → `code -r -w /tmp/evelyn-buffer-….txt`).
+    /// `None` falls back to `$VISUAL`, then `$EDITOR`, then `open -t`
+    /// (macOS default text-editor handler).
+    pub editor: Option<String>,
+
+    /// When true, the editor command is written to the focused window's
+    /// PTY as if typed at the shell prompt, so TUI editors (vi/nvim/hx/…)
+    /// run inside the current terminal instead of attaching to whichever
+    /// TTY originally spawned Evelyn. Leave false for GUI editors
+    /// (`code -r -w`, `cursor -r -w`, `open -t`, …).
+    pub editor_in_pty: bool,
 }
 
 impl Config {

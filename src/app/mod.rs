@@ -1,5 +1,6 @@
 mod clipboard;
 mod config_watch;
+mod editor;
 mod keyboard;
 mod mouse;
 
@@ -332,6 +333,15 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     if s.eq_ignore_ascii_case("v") {
                         self.paste_from_clipboard();
+                        return;
+                    }
+                    if s.eq_ignore_ascii_case("e") {
+                        // Cmd+E: dump the visible+scrollback buffer to a
+                        // temp file and open it in $VISUAL/$EDITOR (or the
+                        // macOS default text editor). Useful when the CRT
+                        // shader displaces glyphs and makes drag-select
+                        // misalign with cell content.
+                        self.open_buffer_in_editor();
                         return;
                     }
                     if s.eq_ignore_ascii_case("c") {

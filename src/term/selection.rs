@@ -1,4 +1,4 @@
-use super::Term;
+use super::{Cell, Term};
 
 /// One cell range marked by the user, anchored to the buffer's global line
 /// coordinates rather than to screen rows. `anchor` is where the drag /
@@ -152,6 +152,44 @@ impl Term {
             return sel.contains_cell(line, x - 1, self);
         }
         false
+    }
+
+    /// Materialize the whole buffer — scrollback history followed by the
+    /// live screen — as plain text. Each row is trimmed of trailing blanks
+    /// and joined with `\n`; trailing empty rows are dropped so a fresh
+    /// shell prompt at the bottom doesn't add a long tail of blanks. Used
+    /// by "open in $EDITOR" so the user can copy from a plain text view
+    /// when the CRT shader makes drag-select misaligned.
+    pub fn extract_buffer_text(&self) -> String {
+        let cols = self.cols as usize;
+        let mut lines: Vec<String> = Vec::with_capacity(self.history.len() + self.rows as usize);
+        let mut push_row = |row: &[Cell]| {
+            let mut s = String::with_capacity(cols);
+            for cell in row.iter().take(cols) {
+                if cell.ch != '\0' {
+                    s.push(cell.ch);
+                }
+            }
+            // Trim trailing spaces — every row is padded to `cols` cells
+            // even when the actual content is shorter, and that padding
+            // would otherwise survive into the editor as long runs of
+            // whitespace.
+            let trimmed = s.trim_end();
+            lines.push(trimmed.to_string());
+        };
+        for row in &self.history {
+            push_row(row.as_slice());
+        }
+        for y in 0..self.rows as usize {
+            let start = y * cols;
+            push_row(&self.cells[start..start + cols]);
+        }
+        // Drop trailing blank lines so the buffer doesn't end with screen-
+        // filling whitespace under the prompt.
+        while matches!(lines.last(), Some(s) if s.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
     }
 
     /// Materialize the selection to a String, joining rows with `\n` and

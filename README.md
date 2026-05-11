@@ -52,6 +52,8 @@ and the previous value is kept.
 # ~/.config/evelyn/config.toml
 theme = "tokyo-night"        # built-in name or file under themes/
 shell = "/opt/homebrew/bin/fish"   # default: $SHELL, then /bin/bash
+editor = "code -r -w"        # Cmd+E target; default: $VISUAL/$EDITOR/open -t
+editor_in_pty = false        # true → run inside the focused window's shell (vi/nvim/hx)
 
 [font]
 family = "Geist Mono"        # falls back to bundled Geist Mono Nerd Font
@@ -105,6 +107,7 @@ red   = "#f7768e"
 | `Cmd+V`   | Paste (bracketed when the app supports it)   |
 | `Cmd+N`   | Open a new window (spawns a new process)     |
 | `Cmd+R`   | Force-reload config + theme                  |
+| `Cmd+E`   | Open buffer (scrollback + screen) in the configured editor |
 | `Cmd+W`   | Quit                                         |
 
 Drag with the left mouse button to select; the selection is also copied
