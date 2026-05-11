@@ -28,6 +28,13 @@ impl Pty {
         })?;
 
         let mut cmd = CommandBuilder::new(config().resolved_shell());
+        // Without this, the shell starts non-login and path_helper never
+        // runs, so /etc/paths-based entries (e.g. /opt/homebrew/bin) drop
+        // off PATH. Children like Helix's `:sh` then fail to spawn `fish`
+        // with ENOENT. Match Alacritty/Terminal.app and force login on
+        // macOS — fish/bash/zsh all accept -l.
+        #[cfg(target_os = "macos")]
+        cmd.arg("-l");
         if let Ok(home) = std::env::var("HOME") {
             cmd.cwd(home);
         }
