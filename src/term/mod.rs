@@ -136,6 +136,23 @@ pub struct Term {
     /// Active mouse / keyboard selection, if any. Anchored in global line
     /// coordinates so it survives history rolling and scrollback navigation.
     pub selection: Option<Selection>,
+    /// Designated character sets for G0 / G1. tmux/vim/less switch G0 to
+    /// DEC Special Graphics with `ESC ( 0` to draw box borders, then back
+    /// with `ESC ( B`. Without honoring this the border characters render
+    /// as raw `qqq…` / `xxx…` ASCII.
+    charset_g0: Charset,
+    charset_g1: Charset,
+    /// Which of G0/G1 is currently mapped to GL — flipped by SI (0x0F → G0)
+    /// and SO (0x0E → G1). Most apps stay on G0 and toggle the *designation*
+    /// instead, but ncurses drives borders via SO/SI on terminals where
+    /// that's cheaper.
+    active_charset: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Charset {
+    Ascii,
+    DecSpecialGraphics,
 }
 
 /// One cell range marked by the user, anchored to the buffer's global line
@@ -312,7 +329,30 @@ impl Term {
             view_offset: 0,
             history_dropped: 0,
             selection: None,
+            charset_g0: Charset::Ascii,
+            charset_g1: Charset::Ascii,
+            active_charset: 0,
         }
+    }
+
+    pub(super) fn designate_charset(&mut self, slot: u8, cs: Charset) {
+        match slot {
+            0 => self.charset_g0 = cs,
+            1 => self.charset_g1 = cs,
+            _ => {}
+        }
+    }
+
+    pub(super) fn shift_in(&mut self) {
+        self.active_charset = 0;
+    }
+
+    pub(super) fn shift_out(&mut self) {
+        self.active_charset = 1;
+    }
+
+    fn active_cs(&self) -> Charset {
+        if self.active_charset == 0 { self.charset_g0 } else { self.charset_g1 }
     }
 
     pub fn is_alt_screen(&self) -> bool {
@@ -460,6 +500,11 @@ impl Term {
     }
 
     fn put_char(&mut self, c: char) {
+        let c = if self.active_cs() == Charset::DecSpecialGraphics {
+            dec_special_graphics(c)
+        } else {
+            c
+        };
         let wide = is_wide(c);
         let needed = if wide { 2 } else { 1 };
         // Consume a deferred wrap from a previous print at the right edge.
@@ -953,5 +998,46 @@ impl Term {
             *cell = blank;
         }
         self.dirty = true;
+    }
+}
+
+/// DEC Special Graphics (charset `0`) → Unicode. tmux/vim/htop draw box
+/// borders by switching G0 to this set and emitting plain ASCII letters,
+/// which we'd otherwise render literally as `qqq…` for horizontal lines.
+/// Characters outside the table pass through unchanged.
+fn dec_special_graphics(c: char) -> char {
+    match c {
+        '`' => '\u{25C6}', // ◆
+        'a' => '\u{2592}', // ▒
+        'b' => '\u{2409}', // ␉ HT symbol
+        'c' => '\u{240C}', // ␌ FF symbol
+        'd' => '\u{240D}', // ␍ CR symbol
+        'e' => '\u{240A}', // ␊ LF symbol
+        'f' => '\u{00B0}', // °
+        'g' => '\u{00B1}', // ±
+        'h' => '\u{2424}', // ␤ NL symbol
+        'i' => '\u{240B}', // ␋ VT symbol
+        'j' => '\u{2518}', // ┘
+        'k' => '\u{2510}', // ┐
+        'l' => '\u{250C}', // ┌
+        'm' => '\u{2514}', // └
+        'n' => '\u{253C}', // ┼
+        'o' => '\u{23BA}', // ⎺
+        'p' => '\u{23BB}', // ⎻
+        'q' => '\u{2500}', // ─
+        'r' => '\u{23BC}', // ⎼
+        's' => '\u{23BD}', // ⎽
+        't' => '\u{251C}', // ├
+        'u' => '\u{2524}', // ┤
+        'v' => '\u{2534}', // ┴
+        'w' => '\u{252C}', // ┬
+        'x' => '\u{2502}', // │
+        'y' => '\u{2264}', // ≤
+        'z' => '\u{2265}', // ≥
+        '{' => '\u{03C0}', // π
+        '|' => '\u{2260}', // ≠
+        '}' => '\u{00A3}', // £
+        '~' => '\u{00B7}', // ·
+        _ => c,
     }
 }

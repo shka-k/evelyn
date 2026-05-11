@@ -2,7 +2,7 @@ use vte::{Params, Perform};
 
 use crate::color::{cursor_color, default_bg, default_fg, Color, Rgb};
 
-use super::Term;
+use super::{Charset, Term};
 
 impl Perform for Term {
     fn print(&mut self, c: char) {
@@ -16,11 +16,36 @@ impl Perform for Term {
             0x08 => self.backspace(),
             b'\t' => self.tab(),
             0x07 => {} // bell
+            // SI / SO — toggle the GL slot between G0 and G1. ncurses uses
+            // these on terminfo entries that drive borders via SO instead
+            // of designating G0 (`smacs`/`rmacs`).
+            0x0F => self.shift_in(),
+            0x0E => self.shift_out(),
             _ => {}
         }
     }
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        // Charset designation: `ESC ( <c>` for G0, `ESC ) <c>` for G1, etc.
+        // Only `B` (ASCII) and `0` (DEC Special Graphics) appear in the
+        // wild for tmux/vim/htop borders; treat anything else as ASCII.
+        if intermediates.len() == 1 {
+            let slot = match intermediates[0] {
+                b'(' => Some(0u8),
+                b')' => Some(1u8),
+                b'*' => Some(2u8), // designated but never made active
+                b'+' => Some(3u8),
+                _ => None,
+            };
+            if let Some(slot) = slot {
+                let cs = match byte {
+                    b'0' => Charset::DecSpecialGraphics,
+                    _ => Charset::Ascii,
+                };
+                self.designate_charset(slot, cs);
+                return;
+            }
+        }
         match byte {
             b'7' => self.save_cursor(),    // DECSC
             b'8' => self.restore_cursor(), // DECRC
