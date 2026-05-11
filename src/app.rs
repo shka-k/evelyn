@@ -57,6 +57,10 @@ struct App {
     pty: Option<Pty>,
     modifiers: Modifiers,
     preedit: String,
+    /// Caret byte offset into `preedit` reported by the IME. Falls back to
+    /// the end of the string when the platform doesn't supply one, so the
+    /// rendered cursor still sits past the last composed char.
+    preedit_cursor: usize,
     /// Sub-line wheel delta accumulator — trackpads send fractional lines
     /// per event, and dropping the fraction would freeze slow scrolls.
     scroll_accum: f32,
@@ -127,6 +131,7 @@ impl App {
             pty: None,
             modifiers: Modifiers::default(),
             preedit: String::new(),
+            preedit_cursor: 0,
             scroll_accum: 0.0,
             cursor_pos: None,
             _config_watcher: None,
@@ -515,13 +520,22 @@ impl App {
         match ime {
             Ime::Enabled | Ime::Disabled => {
                 self.preedit.clear();
+                self.preedit_cursor = 0;
             }
-            Ime::Preedit(text, _cursor) => {
+            Ime::Preedit(text, cursor) => {
+                // winit hands the caret as a byte range `(start, end)`.
+                // Use `end` as a single insertion point — IMEs that report a
+                // collapsed selection set start == end, and for non-empty
+                // selections placing the cursor at the trailing edge is the
+                // conventional spot. None → end of preedit.
+                let caret = cursor.map(|(_, e)| e).unwrap_or(text.len());
+                self.preedit_cursor = caret.min(text.len());
                 self.preedit = text;
                 self.update_ime_cursor_area();
             }
             Ime::Commit(text) => {
                 self.preedit.clear();
+                self.preedit_cursor = 0;
                 if !text.is_empty() {
                     if let Some(p) = &self.pty {
                         p.write(text.as_bytes());
@@ -540,7 +554,13 @@ impl App {
             // cursor is always visible — just rendered hollow instead of
             // solid by the renderer.
             let blink_on = !config().cursor.blink || self.cursor_blink_on;
-            if let Err(e) = r.render(&self.term, &self.preedit, blink_on, self.focused) {
+            if let Err(e) = r.render(
+                &self.term,
+                &self.preedit,
+                self.preedit_cursor,
+                blink_on,
+                self.focused,
+            ) {
                 eprintln!("render error: {e}");
             }
             self.term.dirty = false;

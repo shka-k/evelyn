@@ -223,6 +223,7 @@ impl Renderer {
         &mut self,
         term: &Term,
         preedit: &str,
+        preedit_cursor: usize,
         blink_on: bool,
         focused: bool,
     ) -> Result<()> {
@@ -261,10 +262,10 @@ impl Renderer {
 
         // Preedit
         let has_preedit = !preedit.is_empty();
-        let preedit_w = if has_preedit {
-            self.shape_preedit(preedit, base.clone())
+        let (preedit_w, preedit_caret_x) = if has_preedit {
+            self.shape_preedit(preedit, preedit_cursor, base.clone())
         } else {
-            0.0
+            (0.0, 0.0)
         };
 
         self.viewport.update(
@@ -331,6 +332,7 @@ impl Renderer {
             term,
             has_preedit,
             preedit_w,
+            preedit_caret_x,
             show_cursor,
             cursor_wide,
             cursor_shape,
@@ -432,7 +434,17 @@ impl Renderer {
         }
     }
 
-    fn shape_preedit(&mut self, preedit: &str, base: Attrs<'_>) -> f32 {
+    /// Returns `(total_width, caret_x)` where `caret_x` is the pixel offset
+    /// of the IME caret within the preedit. The caret sits at the leading
+    /// edge of the first glyph whose byte index is `>= preedit_cursor`, or
+    /// at the trailing edge of the last glyph when the caret is past the
+    /// end (e.g. macOS reports caret == text.len() during composition).
+    fn shape_preedit(
+        &mut self,
+        preedit: &str,
+        preedit_cursor: usize,
+        base: Attrs<'_>,
+    ) -> (f32, f32) {
         self.preedit_buffer
             .set_monospace_width(&mut self.font_system, Some(self.cell_width));
         self.preedit_buffer.set_text(
@@ -445,22 +457,33 @@ impl Renderer {
         self.preedit_buffer
             .shape_until_scroll(&mut self.font_system, false);
         let mut max_x: f32 = 0.0;
+        let mut caret_x: f32 = 0.0;
+        let mut caret_set = false;
         for run in self.preedit_buffer.layout_runs() {
             for g in run.glyphs.iter() {
+                if !caret_set && g.start >= preedit_cursor {
+                    caret_x = g.x;
+                    caret_set = true;
+                }
                 max_x = max_x.max(g.x + g.w);
             }
         }
-        max_x
+        if !caret_set {
+            caret_x = max_x;
+        }
+        (max_x, caret_x)
     }
 
     /// Cursor in the configured shape, or — when IME is composing — the
-    /// preedit underline.
+    /// preedit underline plus a Bar caret that tracks the IME's reported
+    /// caret position inside the preedit.
     #[allow(clippy::too_many_arguments)]
     fn overlay_quads(
         &self,
         term: &Term,
         has_preedit: bool,
         preedit_w: f32,
+        preedit_caret_x: f32,
         show_cursor: bool,
         cursor_wide: bool,
         cursor_shape: CursorShape,
@@ -471,13 +494,27 @@ impl Renderer {
         if has_preedit {
             let underline_h = (PREEDIT_UNDERLINE_PT * self.scale).round().max(1.0);
             let w = preedit_w.max(self.cell_width);
-            return vec![Rect {
-                x: pre_left,
-                y: pre_top + self.line_height - underline_h,
-                w,
-                h: underline_h,
-                color: rgb_to_rgba(cursor_color(), 1.0),
-            }];
+            let stripe = (2.0 * self.scale).round().max(1.0);
+            let color = rgb_to_rgba(cursor_color(), 1.0);
+            return vec![
+                Rect {
+                    x: pre_left,
+                    y: pre_top + self.line_height - underline_h,
+                    w,
+                    h: underline_h,
+                    color,
+                },
+                // Bar caret inside the preedit — clamped to the trailing
+                // edge so it stays visible when the IME parks the caret
+                // past the last glyph (typical macOS behavior).
+                Rect {
+                    x: pre_left + preedit_caret_x.min(w - stripe).max(0.0),
+                    y: pre_top,
+                    w: stripe,
+                    h: self.line_height,
+                    color,
+                },
+            ];
         }
         if !show_cursor {
             return Vec::new();
