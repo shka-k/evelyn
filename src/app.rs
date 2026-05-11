@@ -818,6 +818,10 @@ impl ApplicationHandler<UserEvent> for App {
                         event_loop.exit();
                         return;
                     }
+                    if s.eq_ignore_ascii_case("n") {
+                        spawn_new_window();
+                        return;
+                    }
                     if s.eq_ignore_ascii_case("r") {
                         self.on_config_reload();
                         return;
@@ -886,6 +890,26 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             event_loop.set_control_flow(ControlFlow::WaitUntil(next));
         }
+    }
+}
+
+/// Spawn a detached copy of ourselves for Cmd+N. We re-exec the current
+/// binary (so a `cargo run` instance opens another `cargo run`-built
+/// binary, and the bundled .app opens the same .app), then drop the
+/// child handle: the new process runs independently and we don't want
+/// its lifetime tied to ours. Errors are logged and swallowed — failing
+/// to open a window shouldn't crash the existing session.
+fn spawn_new_window() {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[evelyn] current_exe() failed: {e}");
+            return;
+        }
+    };
+    match std::process::Command::new(&exe).spawn() {
+        Ok(_child) => {}
+        Err(e) => eprintln!("[evelyn] spawn new window failed: {e}"),
     }
 }
 

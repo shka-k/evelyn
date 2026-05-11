@@ -103,6 +103,7 @@ red   = "#f7768e"
 | --------- | -------------------------------------------- |
 | `Cmd+C`   | Copy selection (when a selection is active)  |
 | `Cmd+V`   | Paste (bracketed when the app supports it)   |
+| `Cmd+N`   | Open a new window (spawns a new process)     |
 | `Cmd+R`   | Force-reload config + theme                  |
 | `Cmd+W`   | Quit                                         |
 
