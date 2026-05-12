@@ -5,6 +5,9 @@
 //! confined to this file so the rest of the renderer doesn't depend on
 //! a specific shaping library.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use anyhow::Result;
 use glyphon::{
     cosmic_text::{FeatureTag, FontFeatures, fontdb, Fallback, PlatformFallback},
@@ -35,6 +38,14 @@ pub struct CosmicEngine {
     /// this so the bold-TP split (which inserts extra runs) stays
     /// consistent between shaping and area placement.
     last_runs: Vec<Run>,
+    /// Hash of the most recent `shape_runs` inputs. When the next call
+    /// matches, the run list, row buffers, and shaped glyph state from
+    /// the previous frame are still valid — we skip set_text / re-shape
+    /// entirely. Invalidated by `set_metrics` (font/size changed) so a
+    /// config or theme reload always reshapes once. Theme-driven fg/bg
+    /// changes that survive a metrics reload still invalidate naturally
+    /// via the `run.fg` bytes in the hash.
+    last_shape_key: Option<u64>,
     preedit_buffer: Buffer,
     font_size: f32,
     line_height: f32,
@@ -79,6 +90,7 @@ impl CosmicEngine {
             text_renderer,
             row_buffers: Vec::new(),
             last_runs: Vec::new(),
+            last_shape_key: None,
             preedit_buffer,
             font_size,
             line_height,
@@ -103,6 +115,10 @@ impl TextEngine for CosmicEngine {
         }
         self.preedit_buffer.set_metrics(&mut self.font_system, m);
         self.cell_width = measure_cell_width(&mut self.font_system, font_size, line_height);
+        // Metrics change invalidates the cached shape: glyph advances and
+        // line height differ, so previously-shaped buffers no longer match
+        // the new cell grid.
+        self.last_shape_key = None;
     }
 
     fn cell_width(&self) -> f32 {
@@ -150,6 +166,34 @@ impl TextEngine for CosmicEngine {
     }
 
     fn shape_runs(&mut self, runs: &[Run], cursor_pos: Option<(u16, u16)>) {
+        // Frame-level early-out: if the run list and cursor position are
+        // byte-identical to the previous call, `row_buffers` already hold
+        // valid shaped glyphs and `last_runs` already has the right (col,
+        // row) layout — `prepare` can read them as-is. Set_text +
+        // shape_until_scroll are the heaviest CPU work in the render path
+        // (cosmic-text + harfbuzz shaping), so skipping them when nothing
+        // changed is a big win for idle / blink-only redraws and for TUIs
+        // where only a small region updates between frames (the run list
+        // still differs there, so the cache misses — but build_runs is
+        // cheap so the wasted comparison is negligible).
+        let mut hasher = DefaultHasher::new();
+        runs.len().hash(&mut hasher);
+        for r in runs {
+            r.col.hash(&mut hasher);
+            r.row.hash(&mut hasher);
+            r.bold.hash(&mut hasher);
+            r.fg.0.hash(&mut hasher);
+            r.fg.1.hash(&mut hasher);
+            r.fg.2.hash(&mut hasher);
+            r.text.hash(&mut hasher);
+        }
+        cursor_pos.hash(&mut hasher);
+        let key = hasher.finish();
+        if self.last_shape_key == Some(key) {
+            return;
+        }
+        self.last_shape_key = Some(key);
+
         // Work around a cosmic-text 0.18 fallback bug: under Bold attrs
         // the matcher can't honor our `common_fallback` ordering (the
         // weight-diff filter knocks out every name in the list) and
