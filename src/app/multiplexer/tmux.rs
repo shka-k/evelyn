@@ -12,6 +12,13 @@ pub struct Target {
     /// we could resolve it through `list-clients`, falling back to
     /// `=session` form when only the session name is known.
     pub target_arg: String,
+    /// Absolute path to the tmux binary, captured from the running
+    /// client's argv. Evelyn.app launched from Finder inherits a
+    /// minimal PATH that does NOT include mise/asdf/homebrew-non-default
+    /// install dirs, so `Command::new("tmux")` would fail with ENOENT
+    /// even though the user is actively using tmux. Spawning the same
+    /// binary by absolute path sidesteps the PATH problem entirely.
+    pub binary: String,
 }
 
 /// Same shape as zellij detection: pane shells live under the
@@ -21,9 +28,33 @@ pub struct Target {
 pub fn detect(scan: &[u32], procs: &Processes) -> Option<Target> {
     let client_pid = find_client(scan, procs)?;
     let client_cmd = procs.command(client_pid).unwrap_or("");
+    let binary = resolve_binary(client_pid, client_cmd);
     let socket = resolve_socket(client_pid, client_cmd)?;
-    let target_arg = resolve_target(&socket, client_pid, client_cmd)?;
-    Some(Target { socket, target_arg })
+    let target_arg = resolve_target(&socket, client_pid, client_cmd, &binary)?;
+    Some(Target {
+        socket,
+        target_arg,
+        binary,
+    })
+}
+
+/// See zellij.rs `binary_path_for` for why argv0 alone isn't enough.
+/// tmux is the case where this matters most: shells like bash exec it
+/// with `argv0 = "tmux"`, not the absolute path, and Evelyn.app's
+/// launchd-inherited PATH doesn't include mise/asdf/homebrew-non-default
+/// dirs, so `Command::new("tmux")` would fail with ENOENT and the
+/// dump would fall back to Evelyn's full buffer (the symptom that
+/// surfaced this).
+fn resolve_binary(pid: u32, cmd: &str) -> String {
+    if let Some(path) = socket_probe::executable_path(pid, "tmux") {
+        return path;
+    }
+    if let Some(argv0) = cmd.split_whitespace().next()
+        && argv0.starts_with('/')
+    {
+        return argv0.to_string();
+    }
+    "tmux".to_string()
 }
 
 fn find_client(scan: &[u32], procs: &Processes) -> Option<u32> {
@@ -54,20 +85,20 @@ fn resolve_socket(pid: u32, cmd: &str) -> Option<String> {
 /// Two-step lookup: get our client's tty by PID, then run
 /// `display-message` as that client so the `#{pane_id}` evaluation
 /// sits in the right session/window/pane context.
-fn resolve_target(socket: &str, client_pid: u32, cmd: &str) -> Option<String> {
-    if let Some(tty) = client_tty_for_pid(socket, client_pid)
-        && let Some(pane) = pane_for_client_tty(socket, &tty)
+fn resolve_target(socket: &str, client_pid: u32, cmd: &str, binary: &str) -> Option<String> {
+    if let Some(tty) = client_tty_for_pid(socket, client_pid, binary)
+        && let Some(pane) = pane_for_client_tty(socket, &tty, binary)
     {
         return Some(pane);
     }
     if let Some(session) = arg_value(cmd, "-t") {
         return Some(format!("={session}"));
     }
-    any_session_on_socket(socket).map(|s| format!("={s}"))
+    any_session_on_socket(socket, binary).map(|s| format!("={s}"))
 }
 
-fn client_tty_for_pid(socket: &str, client_pid: u32) -> Option<String> {
-    let out = Command::new("tmux")
+fn client_tty_for_pid(socket: &str, client_pid: u32, binary: &str) -> Option<String> {
+    let out = Command::new(binary)
         .args([
             "-S",
             socket,
@@ -102,11 +133,11 @@ fn client_tty_for_pid(socket: &str, client_pid: u32) -> Option<String> {
     None
 }
 
-fn pane_for_client_tty(socket: &str, client_tty: &str) -> Option<String> {
+fn pane_for_client_tty(socket: &str, client_tty: &str, binary: &str) -> Option<String> {
     // `display-message`'s `-c` selects the target-client (its tty);
     // `-t` is target-pane, which is what we're trying to discover and
     // would defeat the lookup. The format goes as a positional arg.
-    let out = Command::new("tmux")
+    let out = Command::new(binary)
         .args([
             "-S",
             socket,
@@ -125,8 +156,8 @@ fn pane_for_client_tty(socket: &str, client_tty: &str) -> Option<String> {
     if pane.is_empty() { None } else { Some(pane) }
 }
 
-fn any_session_on_socket(socket: &str) -> Option<String> {
-    let out = Command::new("tmux")
+fn any_session_on_socket(socket: &str, binary: &str) -> Option<String> {
+    let out = Command::new(binary)
         .args(["-S", socket, "list-sessions", "-F", "#S"])
         .output()
         .ok()?;
@@ -153,7 +184,7 @@ fn arg_value(cmd: &str, flag: &str) -> Option<String> {
 /// prints the focused pane's history (full scrollback via `-S -`) to
 /// stdout. We write that straight to `dest`.
 pub fn dump(target: &Target, dest: &Path) -> bool {
-    let out = match Command::new("tmux")
+    let out = match Command::new(&target.binary)
         .args([
             "-S",
             &target.socket,

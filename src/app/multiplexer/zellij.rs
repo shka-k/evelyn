@@ -6,6 +6,13 @@ use super::{ProcInfo, Processes};
 
 pub struct Target {
     pub session: String,
+    /// Absolute path to the zellij binary, captured from the running
+    /// client's argv. Evelyn.app launched from Finder inherits a
+    /// minimal PATH that does NOT include mise/asdf/homebrew-non-default
+    /// install dirs, so `Command::new("zellij")` would fail with ENOENT
+    /// even though the user is actively using zellij. Spawning the same
+    /// binary by absolute path sidesteps the PATH problem entirely.
+    pub binary: String,
 }
 
 /// Detection flow:
@@ -23,15 +30,18 @@ pub struct Target {
 ///      case, but it works without any OS-specific socket inspection.
 pub fn detect(scan: &[u32], procs: &Processes) -> Option<Target> {
     let client = find_client(scan, procs)?;
+    let binary = binary_path_for(client, procs);
     if let Some(path) = socket_probe::connected_socket_path(client) {
         return Some(Target {
             session: session_from_socket_path(&path),
+            binary,
         });
     }
     let servers = list_servers(procs);
     if servers.len() == 1 {
         return Some(Target {
             session: session_from_socket_path(&servers[0].1),
+            binary,
         });
     }
     None
@@ -41,6 +51,27 @@ fn find_client(scan: &[u32], procs: &Processes) -> Option<u32> {
     scan.iter()
         .copied()
         .find(|&pid| procs.command(pid).is_some_and(is_client_cmd))
+}
+
+/// Resolve the absolute path of the multiplexer binary. The order
+/// matters because argv0 (from `ps`) is unreliable: the user's shell
+/// may exec with just the bare name, and on macOS Evelyn.app inherits
+/// a stripped PATH from launchd so `Command::new("zellij")` would
+/// ENOENT. lsof's `txt` mapping is authoritative when available;
+/// argv0 is the fallback for the case where it already happens to be
+/// absolute (some shells do this); the bare name is the last resort.
+fn binary_path_for(pid: u32, procs: &Processes) -> String {
+    if let Some(path) = socket_probe::executable_path(pid, "zellij") {
+        return path;
+    }
+    if let Some(argv0) = procs
+        .command(pid)
+        .and_then(|c| c.split_whitespace().next())
+        && argv0.starts_with('/')
+    {
+        return argv0.to_string();
+    }
+    "zellij".to_string()
 }
 
 fn is_client_cmd(cmd: &str) -> bool {
@@ -84,7 +115,7 @@ fn session_from_socket_path(path: &str) -> String {
 /// passing the path positionally fails with exit 2 and zellij prints to
 /// stdout instead.
 pub fn dump(target: &Target, dest: &Path) -> bool {
-    let mut cmd = Command::new("zellij");
+    let mut cmd = Command::new(&target.binary);
     cmd.args([
         "--session",
         &target.session,
