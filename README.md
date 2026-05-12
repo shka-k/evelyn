@@ -9,8 +9,8 @@ and an Alacritty-compatible theme schema.
 - **GPU rendering** via `wgpu` (Metal on macOS) with `glyphon` for text shaping.
 - **CRT shader** post-pass (`newpixie-crt`) toggleable in config; drop your
   own `.wgsl` into `~/.config/evelyn/shaders/` to use it.
-- **Themes** — built-ins (`default`, `tokyo-night`, `dracula`, `nord`,
-  `gruvbox-dark`, `catppuccin-mocha`) plus any Alacritty `[colors.*]` TOML
+- **Themes** — built-ins (`default`, `neon-green`, `tokyo-night`, `dracula`,
+  `nord`, `gruvbox-dark`, `catppuccin-mocha`) plus any Alacritty `[colors.*]` TOML
   file under `~/.config/evelyn/themes/`. You can symlink your existing
   `~/.config/alacritty/themes/` directory in directly.
 - **Hot reload** — edits to `config.toml` or the active theme file are

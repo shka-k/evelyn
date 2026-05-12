@@ -7,6 +7,7 @@ use super::super::theme::{AnsiPalette, ThemeConfig};
 
 pub const BUILTIN_THEMES: &[(&str, ThemeConfig)] = &[
     ("default", DEFAULT),
+    ("neon-green", NEON_GREEN),
     ("tokyo-night", TOKYO_NIGHT),
     ("dracula", DRACULA),
     ("nord", NORD),
@@ -39,6 +40,34 @@ pub const DEFAULT: ThemeConfig = ThemeConfig {
         bright_blue: Rgb(0x8a, 0xb8, 0xff),
         bright_magenta: Rgb(0xff, 0x66, 0xe8),
         bright_cyan: Rgb(0xa8, 0xff, 0xff),
+        bright_white: Rgb(0xff, 0xff, 0xff),
+    },
+};
+
+// Sibling of DEFAULT, rotated to a green primary. Vivid neon green leads
+// foreground and cursor; reds and magentas are pulled back to dusty,
+// desaturated tones so green stays the dominant punch.
+pub const NEON_GREEN: ThemeConfig = ThemeConfig {
+    background: Rgb(0x03, 0x0a, 0x06),
+    foreground: Rgb(0xa8, 0xff, 0xb5),
+    cursor: Rgb(0x1f, 0xff, 0x3c),
+    cursor_text: Rgb(0x03, 0x0a, 0x06),
+    ansi: AnsiPalette {
+        black: Rgb(0x0b, 0x1c, 0x11),
+        red: Rgb(0xc8, 0x5a, 0x6a),
+        green: Rgb(0x1f, 0xff, 0x3c),
+        yellow: Rgb(0xd4, 0xff, 0x47),
+        blue: Rgb(0x44, 0xc8, 0xff),
+        magenta: Rgb(0xc8, 0x55, 0xb8),
+        cyan: Rgb(0x00, 0xff, 0xa8),
+        white: Rgb(0xa8, 0xff, 0xb5),
+        bright_black: Rgb(0x6e, 0x7d, 0x74),
+        bright_red: Rgb(0xd9, 0x7a, 0x88),
+        bright_green: Rgb(0x5f, 0xff, 0x7a),
+        bright_yellow: Rgb(0xe4, 0xff, 0x66),
+        bright_blue: Rgb(0x8a, 0xd6, 0xff),
+        bright_magenta: Rgb(0xe0, 0x7a, 0xd0),
+        bright_cyan: Rgb(0x5f, 0xff, 0xc0),
         bright_white: Rgb(0xff, 0xff, 0xff),
     },
 };
