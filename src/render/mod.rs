@@ -196,7 +196,12 @@ impl Renderer {
         } else {
             false
         };
-        let cursor_shape = live_config().cursor.shape;
+        // App-driven DECSCUSR (helix/vim swap shape on mode change) overrides
+        // the configured default. `None` means no override, fall back to config.
+        let cursor_shape = term
+            .cursor_style
+            .map(|(s, _)| s)
+            .unwrap_or(live_config().cursor.shape);
 
         // Preedit shaping comes first so we know how many cells it spans;
         // those cells are then masked out of the grid runs and SGR bg quads

@@ -1,6 +1,7 @@
 use vte::{Params, Perform};
 
 use crate::color::{cursor_color, default_bg, default_fg, Color, Rgb};
+use crate::config::CursorShape;
 
 use super::{Charset, Term};
 
@@ -105,6 +106,24 @@ impl Perform for Term {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // DECSCUSR — `CSI Ps SP q`. Sets the cursor shape and blink. Param 0
+        // (or no param) resets to the user's configured default; we encode
+        // that as clearing the override. Unknown values are ignored.
+        if intermediates == b" " && action == 'q' {
+            let ps = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
+            self.cursor_style = match ps {
+                0 => None,
+                1 => Some((CursorShape::Block, true)),
+                2 => Some((CursorShape::Block, false)),
+                3 => Some((CursorShape::Underline, true)),
+                4 => Some((CursorShape::Underline, false)),
+                5 => Some((CursorShape::Bar, true)),
+                6 => Some((CursorShape::Bar, false)),
+                _ => self.cursor_style,
+            };
+            self.dirty = true;
+            return;
+        }
         // DECSET / DECRST — `\e[?Nh / l`. Cover the modes we actually act on.
         if intermediates == b"?" && (action == 'h' || action == 'l') {
             let on = action == 'h';

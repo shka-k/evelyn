@@ -8,6 +8,7 @@ mod selection;
 use std::collections::VecDeque;
 
 use crate::color::Color;
+use crate::config::CursorShape;
 
 pub use cell::Cell;
 pub use selection::{Selection, SelectionMode};
@@ -118,6 +119,10 @@ history_dropped: usize,
     /// Active mouse / keyboard selection, if any. Anchored in global line
     /// coordinates so it survives history rolling and scrollback navigation.
     pub selection: Option<Selection>,
+    /// DECSCUSR (`CSI Ps SP q`) override. `None` means fall back to the
+    /// user's config; `Some((shape, blink))` is set by the foreground app
+    /// (helix/vim/fish all swap shape on mode change). Param 0 clears it.
+    pub cursor_style: Option<(CursorShape, bool)>,
     /// Designated character sets for G0 / G1. tmux/vim/less switch G0 to
     /// DEC Special Graphics with `ESC ( 0` to draw box borders, then back
     /// with `ESC ( B`. Without honoring this the border characters render
@@ -161,6 +166,7 @@ impl Term {
             view_offset: 0,
             history_dropped: 0,
             selection: None,
+            cursor_style: None,
             charset_g0: Charset::Ascii,
             charset_g1: Charset::Ascii,
             active_charset: 0,

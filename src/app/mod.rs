@@ -174,12 +174,17 @@ fn sync_grid(&mut self) {
 
     fn on_redraw(&mut self) {
         if let Some(r) = self.renderer.as_mut() {
-            // When blink is disabled in config, blink_on is held at true so
-            // the cursor stays visible regardless of phase state. While
-            // unfocused we also pin blink_on (see `about_to_wait`) so the
-            // cursor is always visible — just rendered hollow instead of
-            // solid by the renderer.
-            let blink_on = !config().cursor.blink || self.cursor_blink_on;
+            // When blink is disabled, blink_on is held at true so the cursor
+            // stays visible regardless of phase state. While unfocused we
+            // also pin blink_on (see `about_to_wait`) so the cursor is
+            // always visible — just rendered hollow instead of solid by the
+            // renderer. DECSCUSR from the foreground app wins over config.
+            let blink_enabled = self
+                .term
+                .cursor_style
+                .map(|(_, b)| b)
+                .unwrap_or(config().cursor.blink);
+            let blink_on = !blink_enabled || self.cursor_blink_on;
             if let Err(e) = r.render(
                 &self.term,
                 &self.preedit,
@@ -391,7 +396,16 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
-        if !cfg.cursor.blink {
+        // DECSCUSR override (set by the foreground app via `CSI Ps SP q`)
+        // wins over the configured blink flag — a steady-bar param has to
+        // suppress wakeups even if the user enabled blink, and vice versa.
+        let blink_enabled = self
+            .term
+            .cursor_style
+            .map(|(_, b)| b)
+            .unwrap_or(cfg.cursor.blink);
+        if !blink_enabled {
+            self.cursor_blink_on = true;
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
