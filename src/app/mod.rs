@@ -46,7 +46,12 @@ const PTY_COALESCE_WINDOW: Duration = Duration::from_millis(8);
 
 #[derive(Debug, Clone)]
 pub enum UserEvent {
-    PtyData(Vec<u8>),
+    /// The PTY reader appended bytes to its shared buffer. Carries no
+    /// payload — the App drains the buffer via `Pty::take_pending` when
+    /// the coalesce window elapses. Only sent on empty → non-empty
+    /// transitions so a burst of kernel chunks doesn't flood winit's
+    /// event queue.
+    PtyData,
     PtyExit,
     /// `~/.config/evelyn/config.toml` (or its theme file) changed on disk.
     /// Coalesced via the timestamp so editor "atomic save" patterns that
@@ -118,15 +123,10 @@ last_click: Option<ClickRecord>,
     /// outline so it's still locatable). Rendering itself keeps running
     /// — a TUI scrolling logs in the background should still update.
 focused: bool,
-    /// Bytes received from the PTY reader thread but not yet handed to
-    /// the parser. Drained by `flush_pty` once `PTY_COALESCE_WINDOW`
-    /// elapses since `pty_first_arrival`, so a burst of small reads
-    /// becomes one parse + one redraw.
-pty_pending: Vec<u8>,
     /// When the first byte in the current pending batch arrived. `None`
-    /// while the buffer is empty; set on the read that transitions the
-    /// buffer from empty → non-empty so the deadline is measured from
-    /// the oldest queued byte, not the newest.
+    /// while the PTY-side buffer is empty; set on the wake event that
+    /// transitions it from empty → non-empty so the deadline is measured
+    /// from the oldest queued byte, not the newest.
 pty_first_arrival: Option<Instant>,
 }
 
@@ -153,7 +153,6 @@ impl App {
             last_reported_cell: None,
             last_click: None,
             focused: true,
-            pty_pending: Vec::new(),
             pty_first_arrival: None,
         }
     }
@@ -234,12 +233,13 @@ fn sync_grid(&mut self) {
         }
     }
 
-    fn on_pty_data(&mut self, bytes: Vec<u8>) {
-        if self.pty_pending.is_empty() {
+    fn on_pty_data(&mut self) {
+        // Each PtyData event is an empty → non-empty transition on the
+        // shared buffer, so the first arrival anchors the coalesce window
+        // here. Multiple wakes between flushes can't happen — the reader
+        // only fires the next wake after we drain in `flush_pty`.
+        if self.pty_first_arrival.is_none() {
             self.pty_first_arrival = Some(Instant::now());
-            self.pty_pending = bytes;
-        } else {
-            self.pty_pending.extend_from_slice(&bytes);
         }
     }
 
@@ -249,7 +249,10 @@ fn sync_grid(&mut self) {
     /// with an empty buffer; the wakeup path invokes it unconditionally
     /// once the coalesce window elapses.
     fn flush_pty(&mut self) {
-        let bytes = std::mem::take(&mut self.pty_pending);
+        let bytes = match &self.pty {
+            Some(p) => p.take_pending(),
+            None => Vec::new(),
+        };
         self.pty_first_arrival = None;
         if bytes.is_empty() {
             return;
@@ -309,8 +312,8 @@ impl ApplicationHandler<UserEvent> for App {
         let pty = match Pty::spawn(
             cols,
             rows,
-            move |bytes| {
-                let _ = proxy.send_event(UserEvent::PtyData(bytes));
+            move || {
+                let _ = proxy.send_event(UserEvent::PtyData);
             },
             move || {
                 let _ = exit_proxy.send_event(UserEvent::PtyExit);
@@ -337,7 +340,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::PtyData(bytes) => self.on_pty_data(bytes),
+            UserEvent::PtyData => self.on_pty_data(),
             UserEvent::PtyExit => {
                 // Drain any final bytes the shell wrote before exiting so
                 // farewell messages ("logout"/"exit") still make it onto
