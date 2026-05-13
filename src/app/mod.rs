@@ -34,6 +34,15 @@ const INITIAL_WINDOW_SIZE_LOGICAL: (f64, f64) = (960.0, 600.0);
 const INITIAL_COLS: u16 = 80;
 const INITIAL_ROWS: u16 = 24;
 pub(super) const IME_CANDIDATE_WIDTH_CELLS: f64 = 10.0;
+/// Burst-coalescing window for PTY output. The reader thread returns from
+/// `read()` per kernel chunk, which for a verbose command (build logs,
+/// `cat`, `yes`) can mean thousands of wakeups per second. Holding bytes
+/// for this long and parsing+rendering once per window pins the maximum
+/// render rate around 1/window regardless of input volume. 8ms is below
+/// one 120Hz frame, so user-visible latency stays under the screen's own
+/// refresh quantum — invisible in practice, but the GPU stops being woken
+/// for every keystroke echo.
+const PTY_COALESCE_WINDOW: Duration = Duration::from_millis(8);
 
 #[derive(Debug, Clone)]
 pub enum UserEvent {
@@ -109,6 +118,16 @@ last_click: Option<ClickRecord>,
     /// outline so it's still locatable). Rendering itself keeps running
     /// — a TUI scrolling logs in the background should still update.
 focused: bool,
+    /// Bytes received from the PTY reader thread but not yet handed to
+    /// the parser. Drained by `flush_pty` once `PTY_COALESCE_WINDOW`
+    /// elapses since `pty_first_arrival`, so a burst of small reads
+    /// becomes one parse + one redraw.
+pty_pending: Vec<u8>,
+    /// When the first byte in the current pending batch arrived. `None`
+    /// while the buffer is empty; set on the read that transitions the
+    /// buffer from empty → non-empty so the deadline is measured from
+    /// the oldest queued byte, not the newest.
+pty_first_arrival: Option<Instant>,
 }
 
 impl App {
@@ -134,6 +153,8 @@ impl App {
             last_reported_cell: None,
             last_click: None,
             focused: true,
+            pty_pending: Vec::new(),
+            pty_first_arrival: None,
         }
     }
 
@@ -214,6 +235,25 @@ fn sync_grid(&mut self) {
     }
 
     fn on_pty_data(&mut self, bytes: Vec<u8>) {
+        if self.pty_pending.is_empty() {
+            self.pty_first_arrival = Some(Instant::now());
+            self.pty_pending = bytes;
+        } else {
+            self.pty_pending.extend_from_slice(&bytes);
+        }
+    }
+
+    /// Hand the accumulated PTY bytes to the parser, then drive any side
+    /// effects the parser surfaced (terminal replies back to the app,
+    /// OSC-52 clipboard copies, dirty bit → redraw request). Safe to call
+    /// with an empty buffer; the wakeup path invokes it unconditionally
+    /// once the coalesce window elapses.
+    fn flush_pty(&mut self) {
+        let bytes = std::mem::take(&mut self.pty_pending);
+        self.pty_first_arrival = None;
+        if bytes.is_empty() {
+            return;
+        }
         self.parser.advance(&mut self.term, &bytes);
         if !self.term.replies.is_empty() {
             let reply = std::mem::take(&mut self.term.replies);
@@ -298,7 +338,13 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyData(bytes) => self.on_pty_data(bytes),
-            UserEvent::PtyExit => event_loop.exit(),
+            UserEvent::PtyExit => {
+                // Drain any final bytes the shell wrote before exiting so
+                // farewell messages ("logout"/"exit") still make it onto
+                // the screen for the brief moment before the window closes.
+                self.flush_pty();
+                event_loop.exit();
+            }
             UserEvent::ConfigReload => self.on_config_reload(),
         }
     }
@@ -381,46 +427,64 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    /// Schedule the next event-loop wakeup for cursor blink. With blink
-    /// disabled we drop straight back to `Wait` so an idle terminal stays
-    /// fully idle. With blink enabled we toggle the phase whenever the
-    /// half-period has elapsed and arm a `WaitUntil` for the next flip,
-    /// so the wakeup rate matches the configured rate exactly.
+    /// Schedule the next event-loop wakeup, taking the earliest of the
+    /// active deadlines: PTY-coalesce flush and cursor blink. With both
+    /// idle we fall back to `ControlFlow::Wait` so a quiescent terminal
+    /// stays fully asleep. PTY-coalesce defers parse + redraw until a
+    /// burst of small reads has settled, so heavy output (build logs,
+    /// `yes`, etc.) renders at ~1/PTY_COALESCE_WINDOW instead of once
+    /// per kernel chunk.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let cfg = config();
-        // Backgrounded → no blink wakeups. Hold the phase at "on" so the
-        // cursor doesn't appear in some random half-state when focus
-        // returns; the re-focus path resets the toggle clock.
-        if !self.focused {
-            self.cursor_blink_on = true;
-            event_loop.set_control_flow(ControlFlow::Wait);
-            return;
+        let now = Instant::now();
+
+        // Coalesce window elapsed → drain the accumulated bytes. `flush_pty`
+        // requests a redraw if the parse marked the term dirty.
+        if let Some(first) = self.pty_first_arrival
+            && now.saturating_duration_since(first) >= PTY_COALESCE_WINDOW
+        {
+            self.flush_pty();
         }
+        let pty_deadline = self.pty_first_arrival.map(|t| t + PTY_COALESCE_WINDOW);
+
         // DECSCUSR override (set by the foreground app via `CSI Ps SP q`)
         // wins over the configured blink flag — a steady-bar param has to
         // suppress wakeups even if the user enabled blink, and vice versa.
-        let blink_enabled = self
-            .term
-            .cursor_style
-            .map(|(_, b)| b)
-            .unwrap_or(cfg.cursor.blink);
-        if !blink_enabled {
-            self.cursor_blink_on = true;
-            event_loop.set_control_flow(ControlFlow::Wait);
-            return;
-        }
-        // 50ms floor — runaway-config guard so a tiny value can't pin a
-        // CPU on busy-wakeup. Above that we trust the user.
-        let interval = Duration::from_millis(cfg.cursor.blink_interval_ms.max(50));
-        let now = Instant::now();
-        let next = self.cursor_blink_last_toggle + interval;
-        if now >= next {
-            self.cursor_blink_on = !self.cursor_blink_on;
-            self.cursor_blink_last_toggle = now;
-            self.request_redraw();
-            event_loop.set_control_flow(ControlFlow::WaitUntil(now + interval));
+        // Backgrounded windows also skip blink wakeups (cursor renders as
+        // a hollow outline regardless of phase).
+        let cfg = config();
+        let blink_enabled = self.focused
+            && self
+                .term
+                .cursor_style
+                .map(|(_, b)| b)
+                .unwrap_or(cfg.cursor.blink);
+        let blink_deadline = if blink_enabled {
+            // 50ms floor — runaway-config guard so a tiny value can't pin a
+            // CPU on busy-wakeup. Above that we trust the user.
+            let interval = Duration::from_millis(cfg.cursor.blink_interval_ms.max(50));
+            let next = self.cursor_blink_last_toggle + interval;
+            if now >= next {
+                self.cursor_blink_on = !self.cursor_blink_on;
+                self.cursor_blink_last_toggle = now;
+                self.request_redraw();
+                Some(now + interval)
+            } else {
+                Some(next)
+            }
         } else {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+            // Hold the phase at "on" so the cursor doesn't appear in some
+            // random half-state when blink re-enables or focus returns; the
+            // re-focus path also resets the toggle clock.
+            self.cursor_blink_on = true;
+            None
+        };
+
+        match (pty_deadline, blink_deadline) {
+            (Some(p), Some(b)) => event_loop.set_control_flow(ControlFlow::WaitUntil(p.min(b))),
+            (Some(d), None) | (None, Some(d)) => {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(d))
+            }
+            (None, None) => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 }
