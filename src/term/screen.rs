@@ -36,14 +36,16 @@ impl Term {
         let new = new as usize;
         if new != self.view_offset {
             self.view_offset = new;
-            self.dirty = true;
+            // Different rows of history are now visible at every screen
+            // position — invalidate per-row caches across the grid.
+            self.mark_all_rows();
         }
     }
 
     pub fn reset_view(&mut self) {
         if self.view_offset != 0 {
             self.view_offset = 0;
-            self.dirty = true;
+            self.mark_all_rows();
         }
     }
 
@@ -77,7 +79,7 @@ impl Term {
         // Snap any active scrollback view back to the live bottom — alt
         // screen owns its own surface and history is meaningless there.
         self.view_offset = 0;
-        self.dirty = true;
+        self.mark_all_rows();
     }
 
     pub(super) fn exit_alt_screen(&mut self) {
@@ -107,7 +109,7 @@ impl Term {
         self.scroll_bot = self.rows.saturating_sub(1);
         self.saved_cursor = None;
         self.pending_wrap = false;
-        self.dirty = true;
+        self.mark_all_rows();
     }
 
     /// Scroll the DECSTBM region up by `n` lines: rows [top, bot] shift
@@ -159,6 +161,9 @@ impl Term {
         for cell in &mut self.cells[blank_start..band_end] {
             *cell = blank;
         }
+        // Every row in the scroll band saw its cell contents shifted —
+        // invalidate the band so the renderer's per-row caches rebuild.
+        self.mark_rows(self.scroll_top, self.scroll_bot);
     }
 
     /// Scroll the DECSTBM region down by `n` lines: rows [top, bot] shift
@@ -183,6 +188,7 @@ impl Term {
         for cell in &mut self.cells[band_start..band_start + shift] {
             *cell = blank;
         }
+        self.mark_rows(self.scroll_top, self.scroll_bot);
     }
 
     pub(super) fn save_cursor(&mut self) {

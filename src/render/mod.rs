@@ -21,9 +21,51 @@ use crate::term::Term;
 use convert::clear_color_for;
 use init::{GpuInit, init_gpu, metrics_for};
 use post::PostProcessor;
-use quad::QuadPipeline;
+use quad::{QuadPipeline, Rect};
 use text::cosmic::CosmicEngine;
 use text::{TextEngine, build_runs, cursor_cell};
+
+use crate::color::Rgb;
+
+/// Snapshot of the rendering parameters that, if they change between
+/// frames, invalidate every cached per-row bg-quad list. Quantize the
+/// floats so an exact-equality check works reliably (cell_width comes
+/// from a measure pass and is stable to many decimals across frames,
+/// but exact f32 eq is brittle — round to 0.01 px units instead).
+#[derive(Clone, PartialEq, Eq)]
+struct BgCacheKey {
+    cols: u16,
+    rows: u16,
+    view_offset: usize,
+    screen_bg: Rgb,
+    cell_width_q: i32,
+    line_height_q: i32,
+    padding_q: i32,
+}
+
+/// Per-row bg-quad cache. `rows[y]` holds the rects for screen row `y`;
+/// `valid[y]` is false when the row needs rebuild (Term marked it dirty
+/// or it was invalidated wholesale by a metrics / screen_bg change).
+/// `key` is the snapshot used to detect wholesale invalidation. When the
+/// preedit mask moves rows between frames, both the old and new mask
+/// rows are flagged invalid via `last_mask`.
+struct BgCache {
+    rows: Vec<Vec<Rect>>,
+    valid: Vec<bool>,
+    key: Option<BgCacheKey>,
+    last_mask: Option<(u16, u16, u16)>,
+}
+
+impl BgCache {
+    fn new() -> Self {
+        Self {
+            rows: Vec::new(),
+            valid: Vec::new(),
+            key: None,
+            last_mask: None,
+        }
+    }
+}
 
 pub struct Renderer {
     pub window: Arc<Window>,
@@ -44,6 +86,11 @@ pub struct Renderer {
     /// Window inset around the grid in surface pixels. `live_config().window.padding`
     /// scaled to physical pixels.
     padding: f32,
+    /// Per-row bg-quad cache, rebuilt only for rows the term marked
+    /// dirty (or all rows when a key like screen_bg / metrics / view
+    /// offset changes). Avoids walking every cell every frame on
+    /// blink-only redraws and partial-grid updates (vim / helix).
+    bg_cache: BgCache,
 }
 
 impl Renderer {
@@ -89,6 +136,7 @@ impl Renderer {
             line_height,
             cell_width,
             padding,
+            bg_cache: BgCache::new(),
         })
     }
 
@@ -311,7 +359,7 @@ impl Renderer {
             // between bg and cursor so an active drag still shows the
             // cursor block, and is alpha-blended so colored cell bgs
             // remain readable underneath.
-            let mut quads = self.build_bg_quads(term, screen_bg, preedit_mask);
+            let mut quads = self.collect_bg_quads(term, screen_bg, preedit_mask);
             quads.extend_from_slice(&self.build_selection_quads(term));
             quads.extend_from_slice(&overlay);
             self.quads.draw(
@@ -334,6 +382,89 @@ impl Renderer {
         frame.present();
         self.engine.trim();
         Ok(())
+    }
+
+    /// Assemble the bg quads for the current frame, rebuilding only rows
+    /// the term marked dirty (plus any row whose preedit-mask state
+    /// changed since the last frame). When a wholesale-invalidation key
+    /// like `screen_bg` or cell metrics changes, every row is rebuilt.
+    /// Returns a flat `Vec<Rect>` in row-major order — the quad pipeline
+    /// doesn't care about order.
+    fn collect_bg_quads(
+        &mut self,
+        term: &Term,
+        screen_bg: Rgb,
+        mask: Option<(u16, u16, u16)>,
+    ) -> Vec<Rect> {
+        let rows = term.rows as usize;
+        let key = BgCacheKey {
+            cols: term.cols,
+            rows: term.rows,
+            view_offset: term.view_offset,
+            screen_bg,
+            // 1/100-pixel quantization is finer than any visible change
+            // the grid would track and far coarser than the float jitter
+            // we want to suppress.
+            cell_width_q: (self.cell_width * 100.0).round() as i32,
+            line_height_q: (self.line_height * 100.0).round() as i32,
+            padding_q: (self.padding * 100.0).round() as i32,
+        };
+        let full_invalidate = self.bg_cache.key.as_ref() != Some(&key);
+        if self.bg_cache.rows.len() != rows {
+            self.bg_cache.rows.resize_with(rows, Vec::new);
+            self.bg_cache.valid.resize(rows, false);
+        }
+        if full_invalidate {
+            for v in &mut self.bg_cache.valid {
+                *v = false;
+            }
+            self.bg_cache.key = Some(key);
+        } else {
+            // Anywhere the preedit mask sat on either the previous or
+            // current frame, the row's quad set depends on a state that
+            // isn't in the bg cache key — force a rebuild of those rows.
+            if let Some((y, _, _)) = self.bg_cache.last_mask
+                && (y as usize) < self.bg_cache.valid.len()
+            {
+                self.bg_cache.valid[y as usize] = false;
+            }
+            if let Some((y, _, _)) = mask
+                && (y as usize) < self.bg_cache.valid.len()
+            {
+                self.bg_cache.valid[y as usize] = false;
+            }
+            // Pick up per-row dirties the term parser recorded since the
+            // last render. Bounded by `rows` in case `dirty_rows` lags
+            // behind a resize.
+            let limit = self.bg_cache.valid.len().min(term.dirty_rows.len());
+            for y in 0..limit {
+                if term.dirty_rows[y] {
+                    self.bg_cache.valid[y] = false;
+                }
+            }
+        }
+        self.bg_cache.last_mask = mask;
+
+        let mut total: usize = 0;
+        for y in 0..rows {
+            if !self.bg_cache.valid[y] {
+                // Swap the cached buffer out so the borrow of `self` for
+                // the build call doesn't conflict with the mutable
+                // borrow of the cache slot. Append into it, then put it
+                // back. Keeps the row's allocation alive across frames.
+                let mut row_buf = std::mem::take(&mut self.bg_cache.rows[y]);
+                row_buf.clear();
+                self.build_bg_quads_row(term, y as u16, screen_bg, mask, &mut row_buf);
+                self.bg_cache.rows[y] = row_buf;
+                self.bg_cache.valid[y] = true;
+            }
+            total += self.bg_cache.rows[y].len();
+        }
+        let mut out = Vec::with_capacity(total);
+        for row_quads in &self.bg_cache.rows {
+            out.extend_from_slice(row_quads);
+        }
+        out
     }
 
     /// Acquire the next surface texture, recovering transient surface losses.

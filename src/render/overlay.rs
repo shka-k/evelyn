@@ -165,55 +165,54 @@ impl Renderer {
         quads
     }
 
-    /// One opaque rect per maximal stretch of cells that share an SGR
-    /// background different from `screen_bg`. Cells whose bg matches
-    /// `screen_bg` are skipped because the surface clear already paints
-    /// them — and `screen_bg` is whatever we cleared the cell pass with,
-    /// not necessarily the theme default.
-    pub(super) fn build_bg_quads(
+    /// One opaque rect per maximal stretch of cells in row `y` that share
+    /// an SGR background different from `screen_bg`. Cells whose bg
+    /// matches `screen_bg` are skipped because the surface clear already
+    /// paints them — and `screen_bg` is whatever we cleared the cell pass
+    /// with, not necessarily the theme default. Output is appended to
+    /// `out` so the caller can amortize allocation across rows.
+    pub(super) fn build_bg_quads_row(
         &self,
         term: &Term,
+        y: u16,
         screen_bg: Rgb,
         mask: Option<(u16, u16, u16)>,
-    ) -> Vec<Rect> {
+        out: &mut Vec<Rect>,
+    ) {
         let cols = term.cols as usize;
-        let mut quads = Vec::new();
-        for y in 0..term.rows {
-            let mut x: usize = 0;
-            while x < cols {
+        let mut x: usize = 0;
+        while x < cols {
+            if let Some((my, ms, me)) = mask
+                && y == my
+                && (x as u16) >= ms
+                && (x as u16) < me
+            {
+                x += 1;
+                continue;
+            }
+            let bg = term.cell_at(x as u16, y).bg_eff();
+            let mut end = x + 1;
+            while end < cols && term.cell_at(end as u16, y).bg_eff() == bg {
                 if let Some((my, ms, me)) = mask
                     && y == my
-                    && (x as u16) >= ms
-                    && (x as u16) < me
+                    && (end as u16) >= ms
+                    && (end as u16) < me
                 {
-                    x += 1;
-                    continue;
+                    break;
                 }
-                let bg = term.cell_at(x as u16, y).bg_eff();
-                let mut end = x + 1;
-                while end < cols && term.cell_at(end as u16, y).bg_eff() == bg {
-                    if let Some((my, ms, me)) = mask
-                        && y == my
-                        && (end as u16) >= ms
-                        && (end as u16) < me
-                    {
-                        break;
-                    }
-                    end += 1;
-                }
-                if bg != screen_bg {
-                    quads.push(Rect {
-                        x: x as f32 * self.cell_width + self.padding,
-                        y: y as f32 * self.line_height + self.padding,
-                        w: (end - x) as f32 * self.cell_width,
-                        h: self.line_height,
-                        color: rgb_to_rgba(bg, 1.0),
-                    });
-                }
-                x = end;
+                end += 1;
             }
+            if bg != screen_bg {
+                out.push(Rect {
+                    x: x as f32 * self.cell_width + self.padding,
+                    y: y as f32 * self.line_height + self.padding,
+                    w: (end - x) as f32 * self.cell_width,
+                    h: self.line_height,
+                    color: rgb_to_rgba(bg, 1.0),
+                });
+            }
+            x = end;
         }
-        quads
     }
 }
 

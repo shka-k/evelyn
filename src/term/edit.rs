@@ -82,7 +82,7 @@ impl Term {
         } else {
             self.cur_x = new_x;
         }
-        self.dirty = true;
+        self.mark_row(self.cur_y);
     }
 
     pub(super) fn line_feed(&mut self) {
@@ -147,7 +147,7 @@ impl Term {
             *cell = blank;
         }
         self.pending_wrap = false;
-        self.dirty = true;
+        self.mark_row(self.cur_y);
     }
 
     /// Delete `n` cells at the cursor (CSI P, DCH). Cells right of the
@@ -175,7 +175,7 @@ impl Term {
             *cell = blank;
         }
         self.pending_wrap = false;
-        self.dirty = true;
+        self.mark_row(self.cur_y);
     }
 
     /// Erase `n` cells in place at the cursor (CSI X, ECH). Cells stay
@@ -193,7 +193,7 @@ impl Term {
             *cell = blank;
         }
         self.pending_wrap = false;
-        self.dirty = true;
+        self.mark_row(self.cur_y);
     }
 
     pub(super) fn erase_in_display(&mut self, mode: u16) {
@@ -209,7 +209,12 @@ impl Term {
         for cell in &mut self.cells[start..end] {
             *cell = blank;
         }
-        self.dirty = true;
+        // erase_in_display can hit anywhere from a single row (mode 0/1
+        // when the cursor is on row 0 or rows-1) up to the entire screen
+        // (mode 2/3). Computing the precise row range is fiddly; just
+        // mark every row dirty — full-screen erase is the common case
+        // and per-row erase already marks via mark_row in erase_in_line.
+        self.mark_all_rows();
     }
 
     pub(super) fn erase_in_line(&mut self, mode: u16) {
@@ -226,6 +231,6 @@ impl Term {
         for cell in &mut self.cells[start..end] {
             *cell = blank;
         }
-        self.dirty = true;
+        self.mark_row(self.cur_y);
     }
 }

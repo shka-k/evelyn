@@ -214,7 +214,9 @@ fn sync_grid(&mut self) {
             ) {
                 eprintln!("render error: {e}");
             }
-            self.term.dirty = false;
+            // Clear both the coarse `dirty` bit and per-row flags now
+            // that the renderer's caches reflect the current grid.
+            self.term.clear_dirty();
         }
     }
 

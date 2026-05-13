@@ -46,6 +46,13 @@ pub struct Term {
     pub bold: bool,
     pub reverse: bool,
     pub dirty: bool,
+    /// Per-screen-row dirty flags, indexed by screen row (0..rows). Set by
+    /// every cell-content mutation; consumed by the renderer's per-row
+    /// caches so unchanged rows skip rebuild work. Cursor / overlay
+    /// changes leave this alone — those are rendered fresh each frame
+    /// from `cur_x`/`cur_y` regardless. Always exactly `rows` long; kept
+    /// in sync by `resize`.
+    pub dirty_rows: Vec<bool>,
     /// `\\e[?25 h/l` — apps like helix or less hide the cursor while
     /// rendering. The renderer skips the block when this is false.
     pub cursor_visible: bool,
@@ -149,6 +156,7 @@ impl Term {
             bold: false,
             reverse: false,
             dirty: true,
+            dirty_rows: vec![true; rows as usize],
             cursor_visible: true,
             auto_wrap: true,
             app_cursor_keys: false,
@@ -187,6 +195,7 @@ impl Term {
         self.cols = cols;
         self.rows = rows;
         self.cells = vec![Cell::default(); (cols as usize) * (rows as usize)];
+        self.dirty_rows = vec![true; rows as usize];
         self.cur_x = self.cur_x.min(cols.saturating_sub(1));
         self.cur_y = self.cur_y.min(rows.saturating_sub(1));
         // Reset scroll region to cover the new size — the app will reissue
@@ -259,6 +268,55 @@ impl Term {
 
 fn idx(&self, x: u16, y: u16) -> usize {
         (y as usize) * (self.cols as usize) + (x as usize)
+    }
+
+    /// Mark one row as needing a bg/quad rebuild. Also flips the coarse
+    /// `dirty` bit so the app knows to redraw at all. Out-of-bounds rows
+    /// (can happen during a mid-resize parse on transient state) are
+    /// ignored.
+    pub(super) fn mark_row(&mut self, y: u16) {
+        if let Some(slot) = self.dirty_rows.get_mut(y as usize) {
+            *slot = true;
+        }
+        self.dirty = true;
+    }
+
+    /// Mark a contiguous range of rows `[top, bot]` inclusive. No-op if
+    /// the range is empty (top > bot) or entirely past the grid.
+    pub(super) fn mark_rows(&mut self, top: u16, bot: u16) {
+        let len = self.dirty_rows.len();
+        if len == 0 || top > bot {
+            return;
+        }
+        let start = (top as usize).min(len);
+        let end = (bot as usize).min(len - 1);
+        if start > end {
+            return;
+        }
+        for slot in &mut self.dirty_rows[start..=end] {
+            *slot = true;
+        }
+        self.dirty = true;
+    }
+
+    /// Mark every visible row dirty. Used by alt-screen swaps, history
+    /// scrolling (view_offset change), and any other operation whose
+    /// effect on the rendered grid spans the full screen.
+    pub(super) fn mark_all_rows(&mut self) {
+        for slot in &mut self.dirty_rows {
+            *slot = true;
+        }
+        self.dirty = true;
+    }
+
+    /// Called by the renderer-driver after a successful render to mark
+    /// the current frame as consumed. Clears both the coarse `dirty`
+    /// flag and the per-row bits.
+    pub fn clear_dirty(&mut self) {
+        self.dirty = false;
+        for slot in &mut self.dirty_rows {
+            *slot = false;
+        }
     }
 
     /// A blank cell carrying the current SGR attributes — what `\\e[K` and
