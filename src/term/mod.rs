@@ -182,22 +182,68 @@ impl Term {
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        // History rows have a fixed cols width — drop them on a width
-        // change rather than reflowing. Height changes leave history alone.
-        if cols != self.cols {
-            self.history.clear();
-            self.view_offset = 0;
+        let old_cols = self.cols as usize;
+        let old_rows = self.rows as usize;
+        let new_cols = cols as usize;
+        let new_rows = rows as usize;
+
+        // Reflow scrollback to the new width — truncate or pad with blanks.
+        // Keeps history alive across width changes; a hard clear here was
+        // the most visible part of the "resize wipes my scrollback" bug.
+        if new_cols != old_cols {
+            for row in self.history.iter_mut() {
+                row.resize(new_cols, Cell::default());
+            }
         }
-        // Selection coordinates are valid against the old grid; the safest
-        // thing on any resize is to drop it so we don't highlight cells
-        // that no longer correspond to the captured content.
-        self.selection = None;
+
+        // Bottom-align the live grid into the new buffer so the prompt stays
+        // anchored at the bottom edge. When shrinking rows, the displaced top
+        // rows of the main screen become scrollback; alt-screen scroll-off
+        // is dropped (history belongs to the shell underneath).
+        let mut new_cells = vec![Cell::default(); new_cols * new_rows];
+        let mut cursor_shift: i32 = 0;
+        if old_cols > 0 && old_rows > 0 {
+            let copy_rows = old_rows.min(new_rows);
+            let src_row_start = old_rows - copy_rows;
+            let dst_row_start = new_rows - copy_rows;
+            let copy_cols = old_cols.min(new_cols);
+            for i in 0..copy_rows {
+                let src = (src_row_start + i) * old_cols;
+                let dst = (dst_row_start + i) * new_cols;
+                new_cells[dst..dst + copy_cols]
+                    .copy_from_slice(&self.cells[src..src + copy_cols]);
+            }
+            if self.saved.is_none() && src_row_start > 0 {
+                for i in 0..src_row_start {
+                    let src = i * old_cols;
+                    let mut row: Vec<Cell> = self.cells[src..src + old_cols].to_vec();
+                    row.resize(new_cols, Cell::default());
+                    if self.history.len() == HISTORY_CAP {
+                        self.history.pop_front();
+                        self.history_dropped += 1;
+                    }
+                    self.history.push_back(row);
+                }
+            }
+            cursor_shift = dst_row_start as i32 - src_row_start as i32;
+        }
+        self.cells = new_cells;
+
+        // Selection is anchored in global line coords (history-rolling-safe),
+        // but the column space shifts on width changes. Keep across pure
+        // height changes; drop on width changes.
+        if new_cols != old_cols {
+            self.selection = None;
+        }
         self.cols = cols;
         self.rows = rows;
-        self.cells = vec![Cell::default(); (cols as usize) * (rows as usize)];
-        self.dirty_rows = vec![true; rows as usize];
+        self.dirty_rows = vec![true; new_rows];
         self.cur_x = self.cur_x.min(cols.saturating_sub(1));
-        self.cur_y = self.cur_y.min(rows.saturating_sub(1));
+        let last_row = rows.saturating_sub(1) as i32;
+        self.cur_y = (self.cur_y as i32 + cursor_shift).clamp(0, last_row) as u16;
+        if self.view_offset > self.history.len() {
+            self.view_offset = self.history.len();
+        }
         // Reset scroll region to cover the new size — the app will reissue
         // CSI r if it cares (zellij does this on its SIGWINCH handler).
         self.scroll_top = 0;
