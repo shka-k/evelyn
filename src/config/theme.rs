@@ -228,9 +228,14 @@ impl ThemeFile {
         ThemeConfig {
             background: self.colors.primary.background,
             foreground: self.colors.primary.foreground,
-            cursor: cursor.and_then(|c| c.cursor).unwrap_or(defaults.cursor),
-            // Some themes omit cursor.text — fall back to background so the
-            // inverted cursor character stays visible.
+            // Many Alacritty theme files omit [colors.cursor] entirely.
+            // Fall back to the theme's own foreground (and background for
+            // cursor_text) so the cursor — and the IME preedit overlay,
+            // which reuses cursor_color — track the active palette instead
+            // of getting frozen on the built-in default's cursor hue.
+            cursor: cursor
+                .and_then(|c| c.cursor)
+                .unwrap_or(self.colors.primary.foreground),
             cursor_text: cursor
                 .and_then(|c| c.text)
                 .unwrap_or(self.colors.primary.background),
