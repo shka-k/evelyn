@@ -6,6 +6,7 @@
 //! a specific shaping library.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use anyhow::Result;
@@ -46,6 +47,11 @@ pub struct CosmicEngine {
     /// changes that survive a metrics reload still invalidate naturally
     /// via the `run.fg` bytes in the hash.
     last_shape_key: Option<u64>,
+    /// Cursor position that was active when `last_runs` was shaped.
+    /// Needed by the per-run cache so the cursor-cell's effective fg
+    /// (cursor_text vs. its own fg) participates in the fingerprint of
+    /// the *previous* frame consistently with the current frame's.
+    last_cursor_pos: Option<(u16, u16)>,
     preedit_buffer: Buffer,
     font_size: f32,
     line_height: f32,
@@ -91,6 +97,7 @@ impl CosmicEngine {
             row_buffers: Vec::new(),
             last_runs: Vec::new(),
             last_shape_key: None,
+            last_cursor_pos: None,
             preedit_buffer,
             font_size,
             line_height,
@@ -115,10 +122,15 @@ impl TextEngine for CosmicEngine {
         }
         self.preedit_buffer.set_metrics(&mut self.font_system, m);
         self.cell_width = measure_cell_width(&mut self.font_system, font_size, line_height);
-        // Metrics change invalidates the cached shape: glyph advances and
-        // line height differ, so previously-shaped buffers no longer match
-        // the new cell grid.
+        // Metrics change invalidates both the frame-level cache key and
+        // the per-run fingerprint lookup: glyph advances and line height
+        // differ, so previously-shaped buffers no longer match the new
+        // cell grid. Clearing `last_runs` empties the per-run lookup map
+        // built on the next call, forcing a full reshape of leftover
+        // buffers (which already have the new metrics set above).
         self.last_shape_key = None;
+        self.last_runs.clear();
+        self.last_cursor_pos = None;
     }
 
     fn cell_width(&self) -> f32 {
@@ -169,13 +181,7 @@ impl TextEngine for CosmicEngine {
         // Frame-level early-out: if the run list and cursor position are
         // byte-identical to the previous call, `row_buffers` already hold
         // valid shaped glyphs and `last_runs` already has the right (col,
-        // row) layout — `prepare` can read them as-is. Set_text +
-        // shape_until_scroll are the heaviest CPU work in the render path
-        // (cosmic-text + harfbuzz shaping), so skipping them when nothing
-        // changed is a big win for idle / blink-only redraws and for TUIs
-        // where only a small region updates between frames (the run list
-        // still differs there, so the cache misses — but build_runs is
-        // cheap so the wasted comparison is negligible).
+        // row) layout — `prepare` can read them as-is.
         let mut hasher = DefaultHasher::new();
         runs.len().hash(&mut hasher);
         for r in runs {
@@ -208,28 +214,64 @@ impl TextEngine for CosmicEngine {
         // wherever a Bold run mixes TP and non-TP chars — so `prepare`
         // must read positions back from this rewritten list, not the
         // caller's original. Cache it on the engine.
-        self.last_runs.clear();
-        match expand_bold_text_presentation_runs(runs) {
-            Some(split) => self.last_runs.extend(split),
-            None => self.last_runs.extend_from_slice(runs),
+        let new_runs: Vec<Run> = match expand_bold_text_presentation_runs(runs) {
+            Some(split) => split,
+            None => runs.to_vec(),
+        };
+
+        // Build a fingerprint → previous-buffer-index lookup. Shaping
+        // depends on (text, fg, bold, is_cursor) — (col, row) is purely
+        // positional and applied later by `prepare`. That means a line of
+        // text that just scrolled up by one row keeps its fingerprint
+        // and reuses its shaped buffer with zero work. Big win for
+        // scrollback browsing, `tail -f`, build logs, vim/helix scrolls.
+        let prev_cursor = self.last_cursor_pos;
+        let mut prev_lookup: HashMap<u64, VecDeque<usize>> = HashMap::new();
+        for (i, r) in self.last_runs.iter().enumerate() {
+            let was_cursor = run_is_cursor(r, prev_cursor);
+            prev_lookup
+                .entry(run_fingerprint(r, was_cursor))
+                .or_default()
+                .push_back(i);
         }
 
-        let needed = self.last_runs.len();
-        while self.row_buffers.len() < needed {
-            let buf = make_buffer(&mut self.font_system, self.font_size, self.line_height);
-            self.row_buffers.push(buf);
+        // Move old buffers into Option slots so we can take them by
+        // index without disturbing the rest of the vec.
+        let mut old_slots: Vec<Option<Buffer>> = self.row_buffers.drain(..).map(Some).collect();
+        let mut new_buffers: Vec<Option<Buffer>> = (0..new_runs.len()).map(|_| None).collect();
+
+        // Pass 1 — pick up cache hits. Anything we miss is reshaped in
+        // Pass 2 below, reusing leftover buffers when possible.
+        let mut misses: Vec<usize> = Vec::new();
+        for (j, run) in new_runs.iter().enumerate() {
+            let is_cursor = run_is_cursor(run, cursor_pos);
+            let fp = run_fingerprint(run, is_cursor);
+            let hit = prev_lookup
+                .get_mut(&fp)
+                .and_then(|q| q.pop_front())
+                .and_then(|i| old_slots[i].take());
+            match hit {
+                Some(buf) => new_buffers[j] = Some(buf),
+                None => misses.push(j),
+            }
         }
+
+        // Pass 2 — reshape misses, reusing leftover buffers from
+        // `old_slots` so we don't churn allocations on scroll. Anything
+        // truly left over after this is dropped at the end of scope.
+        let mut leftover: Vec<Buffer> = old_slots.into_iter().flatten().collect();
         let base = font_attrs();
-        for (i, run) in self.last_runs.iter().enumerate() {
-            let buf = &mut self.row_buffers[i];
-            // Unbounded width so a row run never wraps internally; a stale
-            // buffer width after a window resize would otherwise cause the
-            // overflow to render as a second line in the cell below — which
-            // looks exactly like "the frame got newlined."
+        for j in misses {
+            let run = &new_runs[j];
+            let mut buf = leftover
+                .pop()
+                .unwrap_or_else(|| make_buffer(&mut self.font_system, self.font_size, self.line_height));
+            // Unbounded width so a row run never wraps internally; a
+            // stale buffer width after a window resize would otherwise
+            // cause the overflow to render as a second line in the cell
+            // below — which looks exactly like "the frame got newlined."
             buf.set_size(&mut self.font_system, None, Some(self.line_height));
-            let is_cursor = cursor_pos
-                .map(|(cx, cy)| cx == run.col && cy == run.row && run.text.chars().count() == 1)
-                .unwrap_or(false);
+            let is_cursor = run_is_cursor(run, cursor_pos);
             let fg = if is_cursor {
                 cursor_text_color()
             } else {
@@ -247,7 +289,13 @@ impl TextEngine for CosmicEngine {
                 None,
             );
             buf.shape_until_scroll(&mut self.font_system, false);
+            new_buffers[j] = Some(buf);
         }
+
+        // unwrap() is safe — every slot was filled by either Pass 1 or Pass 2.
+        self.row_buffers = new_buffers.into_iter().map(|o| o.unwrap()).collect();
+        self.last_runs = new_runs;
+        self.last_cursor_pos = cursor_pos;
     }
 
     fn prepare(
@@ -322,6 +370,32 @@ impl TextEngine for CosmicEngine {
 
 fn make_buffer(font_system: &mut FontSystem, font_size: f32, line_height: f32) -> Buffer {
     Buffer::new(font_system, Metrics::new(font_size, line_height))
+}
+
+/// True when this run is exactly the cursor cell (single grapheme at
+/// the cursor position). Matches the rule applied at shape time, so a
+/// previous-frame run reuses its buffer only when both the old and new
+/// frames agree on cursor-inversion state.
+fn run_is_cursor(r: &Run, cursor_pos: Option<(u16, u16)>) -> bool {
+    cursor_pos
+        .map(|(cx, cy)| cx == r.col && cy == r.row && r.text.chars().count() == 1)
+        .unwrap_or(false)
+}
+
+/// Fingerprint a run by exactly the inputs that shaping consumes:
+/// `text`, `fg`, `bold`, and the cursor-inversion flag. `(col, row)` is
+/// deliberately out — a buffer's shaped glyph stream is position-agnostic,
+/// `prepare` translates it into a TextArea later — so a line that scrolls
+/// up one row keeps its fingerprint and reuses its shaped buffer.
+fn run_fingerprint(r: &Run, is_cursor: bool) -> u64 {
+    let mut h = DefaultHasher::new();
+    r.text.hash(&mut h);
+    r.fg.0.hash(&mut h);
+    r.fg.1.hash(&mut h);
+    r.fg.2.hash(&mut h);
+    r.bold.hash(&mut h);
+    is_cursor.hash(&mut h);
+    h.finish()
 }
 
 /// Estimate the advance width of a single monospace glyph by shaping a
