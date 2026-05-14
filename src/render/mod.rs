@@ -380,7 +380,6 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         self.window.pre_present_notify();
         frame.present();
-        self.engine.trim();
         Ok(())
     }
 
