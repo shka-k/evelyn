@@ -96,6 +96,10 @@ fn encode_named(
         // the plain byte sequence with an ESC prefix for alt/meta.
         NamedKey::Enter => return Some(esc_prefix(b"\r", alt)),
         NamedKey::Backspace => return Some(esc_prefix(b"\x7f", alt)),
+        // Shift+Tab → CSI Z (xterm "backtab" / terminfo kcbt). Without
+        // this, shells and editors can't tell forward Tab from reverse
+        // Tab and completion menus won't walk backwards.
+        NamedKey::Tab if shift => return Some(esc_prefix(b"\x1b[Z", alt)),
         NamedKey::Tab => return Some(esc_prefix(b"\t", alt)),
         NamedKey::Escape => return Some(esc_prefix(b"\x1b", alt)),
         NamedKey::Space => return Some(esc_prefix(b" ", alt)),
