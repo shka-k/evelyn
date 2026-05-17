@@ -14,10 +14,24 @@
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var src_sampler: sampler;
-// Theme background as a linear-space color (alpha unused). Set once at
-// startup; the corner fade lerps toward this so the vignette settles
-// into the configured theme bg rather than pure black.
-@group(0) @binding(2) var<uniform> theme_bg: vec4<f32>;
+// Two vec4s of post-pass state, packed back-to-back in one uniform:
+//   u.theme_bg.xyz = linear-space theme background (vignette fade target).
+//   u.theme_bg.w   = window scale factor (DPI). Constants tagged "_PX"
+//                    are authored in physical pixels at scale=1 and get
+//                    multiplied by this so bloom / chromatic split /
+//                    scanlines / shadow mask keep a constant apparent
+//                    width across DPI.
+//   u.metrics.x    = physical-pixel cell height (line height × DPI). The
+//                    CRT pixel grid is sized to this so chunks-per-glyph
+//                    stays constant regardless of monitor / DPI / font
+//                    size — fixing the "bigger monitor → coarser pixels"
+//                    drift you get with a screen-relative grid.
+//   u.metrics.yzw  = reserved.
+struct PostUniforms {
+    theme_bg: vec4<f32>,
+    metrics: vec4<f32>,
+};
+@group(0) @binding(2) var<uniform> u: PostUniforms;
 // Previous frame's CRT output, for phosphor persistence. The Rust side
 // ping-pongs between two textures so the slot we read here is never
 // the slot we write to in this pass.
@@ -50,10 +64,15 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 
 // Tunables that shape the CRT feel.
 const CURVATURE:       f32 = 2.0;  // newpixie default
-// Pixelation: snap source-sample UV to a coarse logical-pixel grid so
-// glyphs read as chunky CRT pixels. Size in physical pixels — 1.0 off,
-// 2-3 typical.
-const PIXEL_SIZE:      f32 = 2.0;
+// Pixelation: number of CRT pixel rows per glyph cell. The grid cell
+// size is derived from `u.metrics.x` (physical cell height) ÷ this, so
+// chunks-per-glyph stays constant whether the user is on a 1080p panel,
+// a Retina laptop, or a 5K external — the previous physical-px-based
+// scheme made low-DPI / large monitors read as rougher because their
+// glyphs got proportionally fewer chunks. Higher = smoother, lower =
+// chunkier. 14 ≈ what PIXEL_SIZE=2 used to give on Retina with the
+// default font.
+const CHUNKS_PER_CELL: f32 = 24.0;
 // 3-pixel shadow mask, matching the original `1 - 0.23 * mod(x,3)/2`.
 const MASK_STRENGTH:   f32 = 0.23;
 // Per-channel chromatic offset in *physical pixels*. The slang uses
@@ -129,9 +148,15 @@ fn tsample(tc: vec2<f32>, dim: vec2<f32>) -> vec3<f32> {
     return textureSample(src_tex, src_sampler, c).rgb * 1.25;
 }
 
-// Snap UV to the logical-pixel grid set by PIXEL_SIZE.
+// Snap UV to a coarse grid sized to the glyph cell. Each chunk is
+// `cell_height / CHUNKS_PER_CELL` physical pixels wide, so a glyph
+// always contains the same number of CRT chunks no matter the monitor
+// size, DPI, or font size — the previous `dim / PIXEL_SIZE` scheme tied
+// the grid to absolute pixels, which let chunks-per-glyph drift with
+// DPI and felt rougher on bigger / lower-DPI displays.
 fn quantize(uv: vec2<f32>, dim: vec2<f32>) -> vec2<f32> {
-    let g = dim / PIXEL_SIZE;
+    let chunk_px = max(u.metrics.x / CHUNKS_PER_CELL, 1.0);
+    let g = dim / chunk_px;
     return (floor(uv * g) + 0.5) / g;
 }
 
@@ -145,8 +170,10 @@ fn bright(c: vec3<f32>) -> vec3<f32> {
 
 // 13-tap weighted bloom. Center + 8 inner-ring + 4 outer cardinals.
 // Each tap goes through `bright` so the result is just the spread glow.
+// Tap radius is in physical pixels, scaled by DPI so the halo width
+// stays visually constant across resolutions.
 fn bloom(uv: vec2<f32>, dim: vec2<f32>) -> vec3<f32> {
-    let t = BLOOM_RADIUS_PX / dim;
+    let t = (BLOOM_RADIUS_PX * u.theme_bg.w) / dim;
     var s = bright(textureSample(src_tex, src_sampler, uv).rgb) * 1.00;
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>( 1.0,  0.0) * t).rgb) * 0.70;
     s = s + bright(textureSample(src_tex, src_sampler, uv + vec2<f32>(-1.0,  0.0) * t).rgb) * 0.70;
@@ -192,13 +219,15 @@ fn fs_main(in: VsOut) -> FsOut {
         + vec2<f32>(0.003, -0.001);
 
     let texel = vec2<f32>(1.0) / dim;
+    let dpi = u.theme_bg.w;
 
     // RGB chromatic split via tsample. Per-channel offsets in pixel
-    // units; tsample applies the stretch + brightness boost + quantize.
+    // units, scaled by DPI so the split stays the same apparent width
+    // on HiDPI displays. tsample applies stretch + brightness + quantize.
     var col = vec3<f32>(0.0);
-    col.r = tsample(scuv + SPLIT_R_PX * texel, dim).r + AMBIENT;
-    col.g = tsample(scuv + SPLIT_G_PX * texel, dim).g + AMBIENT;
-    col.b = tsample(scuv + SPLIT_B_PX * texel, dim).b + AMBIENT;
+    col.r = tsample(scuv + SPLIT_R_PX * dpi * texel, dim).r + AMBIENT;
+    col.g = tsample(scuv + SPLIT_G_PX * dpi * texel, dim).g + AMBIENT;
+    col.b = tsample(scuv + SPLIT_B_PX * dpi * texel, dim).b + AMBIENT;
 
     // Bloom — soft phosphor halo standing in for the original's blur
     // pass. Added before the polynomial so the halo gets the same
@@ -225,15 +254,20 @@ fn fs_main(in: VsOut) -> FsOut {
         * (1.0 - curved_uv.x) * (1.0 - curved_uv.y);
     let vig_alpha = pow(max(v, 0.0), VIG_FALLOFF);
     let lit = col * VIG_GAIN + vec3<f32>(CENTER_LIFT) * vig_alpha;
-    col = mix(theme_bg.rgb, lit, vig_alpha);
+    col = mix(u.theme_bg.rgb, lit, vig_alpha);
 
     // Static-Y scanlines, no time animation: same `0.35 + 0.18*sin`
     // shape as the original, then `pow(s, 0.9)`. Multiplies the body.
-    let scans = clamp(0.35 + 0.18 * sin(-in.uv.y * dim.y * 1.5), 0.0, 1.0);
+    // Divide by DPI so the line count stays proportional to *logical*
+    // height — otherwise a 2x display doubles the number of scanlines
+    // and they fade into noise.
+    let scans = clamp(0.35 + 0.18 * sin(-in.uv.y * dim.y * 1.5 / dpi), 0.0, 1.0);
     col *= pow(scans, 0.9);
 
-    // 3-pixel vertical shadow mask in framebuffer space.
-    let mask_phase = clamp((in.clip.x - floor(in.clip.x / 3.0) * 3.0) / 2.0, 0.0, 1.0);
+    // 3-pixel vertical shadow mask in framebuffer space. Mask period
+    // scales with DPI so the stripe width stays the same in points.
+    let mask_period = 3.0 * dpi;
+    let mask_phase = clamp((in.clip.x - floor(in.clip.x / mask_period) * mask_period) / (mask_period * (2.0 / 3.0)), 0.0, 1.0);
     col *= 1.0 - MASK_STRENGTH * mask_phase;
 
     let final_col = rolloff(col);

@@ -19,6 +19,16 @@ use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 use crate::color::{default_bg, Rgb};
 
+/// Per-frame metrics the CRT shader needs. `dpi_scale` keeps physical-px
+/// effects (bloom radius, chromatic split, scanlines, shadow mask) at a
+/// constant apparent width; `cell_height_physical` lets `quantize` size
+/// the CRT pixel grid to the glyph cell so chunks-per-glyph stays fixed.
+#[derive(Clone, Copy)]
+pub struct Metrics {
+    pub dpi_scale: f32,
+    pub cell_height_physical: f32,
+}
+
 pub struct PostProcessor {
     /// Offscreen color target. The cell grid renders into this; the
     /// post-pass samples it.
@@ -50,10 +60,11 @@ impl PostProcessor {
         device: &Device,
         queue: &Queue,
         format: TextureFormat,
-        width: u32,
-        height: u32,
+        size: (u32, u32),
         wgsl: &str,
+        metrics: Metrics,
     ) -> Self {
+        let (width, height) = size;
         let (texture, view) = create_offscreen(device, format, width, height, "post-offscreen");
         let (h0_tex, h0_view) = create_offscreen(device, format, width, height, "post-history-0");
         let (h1_tex, h1_view) = create_offscreen(device, format, width, height, "post-history-1");
@@ -113,11 +124,18 @@ impl PostProcessor {
                 },
             ],
         });
-        // Theme bg in linear space, padded to vec4. Written once at startup
-        // — the theme is fixed for the lifetime of the process.
+        // Two vec4s packed into one buffer:
+        //   theme_bg: xyz = linear-space theme bg, w = window scale (DPI)
+        //   metrics:  x   = physical-pixel cell height (line height * DPI),
+        //             yzw = currently unused, reserved for future per-frame metrics
+        // The shader reads cell height to size the CRT pixel grid relative
+        // to the glyph cell so chunks-per-glyph stays constant regardless
+        // of DPI / monitor resolution / window size. DPI is kept separate
+        // because bloom / chromatic split / scanlines / shadow mask want a
+        // constant *apparent* width, which is a different scaling rule.
         let uniforms = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("post-uniforms"),
-            contents: bytemuck::cast_slice(&[theme_bg_linear_vec4(default_bg())]),
+            contents: bytemuck::cast_slice(&uniform_words(default_bg(), metrics)),
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         });
         let bind_groups = [
@@ -241,6 +259,18 @@ impl PostProcessor {
 
     pub fn offscreen_view(&self) -> &TextureView {
         &self.view
+    }
+
+    /// Rewrite the uniform buffer with new DPI scale and cell-height
+    /// metrics. Called from the renderer whenever the window's scale
+    /// factor or font metrics change so the CRT shader can keep its
+    /// quantization grid sized to the glyph cell.
+    pub fn set_metrics(&self, queue: &Queue, metrics: Metrics) {
+        queue.write_buffer(
+            &self.uniforms,
+            0,
+            bytemuck::cast_slice(&uniform_words(default_bg(), metrics)),
+        );
     }
 
     /// Run the post-pass: sample the offscreen texture and write to
@@ -373,14 +403,21 @@ fn make_bind_group(
     })
 }
 
-/// sRGB → linear conversion matching the cell-pass clear color, packed
-/// into a `vec4` for the uniform buffer (alpha unused, set to 1).
-fn theme_bg_linear_vec4(bg: Rgb) -> [f32; 4] {
+/// Pack the two uniform vec4s back-to-back. First vec4 is theme bg in
+/// linear space with DPI scale in alpha; second vec4 is `[cell_height,
+/// 0, 0, 0]` where cell_height is the physical-pixel line height (so
+/// the shader can size its quantization grid to the glyph cell instead
+/// of to absolute screen pixels).
+fn uniform_words(bg: Rgb, metrics: Metrics) -> [f32; 8] {
     [
         srgb_to_linear(bg.0) as f32,
         srgb_to_linear(bg.1) as f32,
         srgb_to_linear(bg.2) as f32,
-        1.0,
+        metrics.dpi_scale,
+        metrics.cell_height_physical,
+        0.0,
+        0.0,
+        0.0,
     ]
 }
 

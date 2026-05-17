@@ -20,7 +20,7 @@ use crate::term::Term;
 
 use convert::clear_color_for;
 use init::{GpuInit, init_gpu, metrics_for};
-use post::PostProcessor;
+use post::{Metrics, PostProcessor};
 use quad::{QuadPipeline, Rect};
 use text::cosmic::CosmicEngine;
 use text::{TextEngine, build_runs, cursor_cell};
@@ -113,7 +113,17 @@ impl Renderer {
 
         let quads = QuadPipeline::new(&device, format);
         let post = resolve_shader_source().map(|src| {
-            PostProcessor::new(&device, &queue, format, config.width, config.height, &src)
+            PostProcessor::new(
+                &device,
+                &queue,
+                format,
+                (config.width, config.height),
+                &src,
+                Metrics {
+                    dpi_scale: scale,
+                    cell_height_physical: line_height,
+                },
+            )
         });
 
         eprintln!(
@@ -151,6 +161,15 @@ impl Renderer {
         self.padding = (live_config().window.padding * scale).round();
         self.engine.set_metrics(font_size, line_height);
         self.cell_width = self.engine.cell_width();
+        if let Some(post) = self.post.as_ref() {
+            post.set_metrics(
+                &self.queue,
+                Metrics {
+                    dpi_scale: scale,
+                    cell_height_physical: self.line_height,
+                },
+            );
+        }
     }
 
     /// Re-derive everything that comes from the config: font metrics, cell
@@ -177,9 +196,12 @@ impl Renderer {
                 &self.device,
                 &self.queue,
                 self.config.format,
-                self.config.width,
-                self.config.height,
+                (self.config.width, self.config.height),
                 &src,
+                Metrics {
+                    dpi_scale: self.scale,
+                    cell_height_physical: self.line_height,
+                },
             )
         });
         self.engine.trim();
