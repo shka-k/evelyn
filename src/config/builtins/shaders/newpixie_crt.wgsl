@@ -93,13 +93,13 @@ const BLOOM_INTENSITY: f32 = 0.55;
 const BLOOM_RADIUS_PX: f32 = 4.0;
 // Vignette: `16xy(1-x)(1-y)` peaks at 1.0 in the center, 0 at edges.
 // Multiplied by VIG_GAIN for the lit-phosphor punch in the screen body.
-const VIG_GAIN:  f32 = 1.55;
+const VIG_GAIN:  f32 = 1.6;
 // Additive center glow weighted by the same vignette shape. Multiplying
 // by VIG_GAIN only scales what's already lit, so dark background pixels
 // stay dark even at the center. CENTER_LIFT adds a flat amount on top,
 // so the whole middle of the screen reads as gently emissive — closer
 // to the ambient phosphor glow of a real CRT.
-const CENTER_LIFT: f32 = 0.05;
+const CENTER_LIFT: f32 = 0.1;
 // Shape of the vignette mix. The slang shader uses sqrt (≈0.5) which
 // keeps the corners pretty lit; raising the exponent pulls the falloff
 // inward so the four-corner gradient toward theme_bg reads more clearly
