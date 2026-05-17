@@ -91,7 +91,7 @@ const SPLIT_B_PX: vec2<f32> = vec2<f32>(-2.8, 0.0);
 // the original's separate horizontal+vertical Gaussian blur passes.
 const BLOOM_THRESHOLD: f32 = 0.35;
 const BLOOM_INTENSITY: f32 = 0.55;
-const BLOOM_RADIUS_PX: f32 = 4.0;
+const BLOOM_RADIUS_PX: f32 = 1.0;
 // Vignette: `16xy(1-x)(1-y)` peaks at 1.0 in the center, 0 at edges.
 // Multiplied by VIG_GAIN for the lit-phosphor punch in the screen body.
 const VIG_GAIN:  f32 = 1.6;
