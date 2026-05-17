@@ -73,8 +73,9 @@ const CURVATURE:       f32 = 2.0;  // newpixie default
 // chunkier. 14 ≈ what PIXEL_SIZE=2 used to give on Retina with the
 // default font.
 const CHUNKS_PER_CELL: f32 = 24.0;
-// 3-pixel shadow mask, matching the original `1 - 0.23 * mod(x,3)/2`.
-const MASK_STRENGTH:   f32 = 0.23;
+// 3-pixel shadow mask. Original slang used `1 - 0.23 * mod(x,3)/2`;
+// bumped to 0.3 for a more visible mask on modern high-DPI displays.
+const MASK_STRENGTH:   f32 = 0.3;
 // Per-channel chromatic offset in *physical pixels*. The slang uses
 // uv-space (+0.0009, -0.0011, -0.0015); pixel-units stays consistent
 // across resolutions and survives PIXEL_SIZE quantization. Horizontal
