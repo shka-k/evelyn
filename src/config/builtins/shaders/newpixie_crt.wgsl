@@ -91,7 +91,7 @@ const SPLIT_B_PX: vec2<f32> = vec2<f32>(-2.8, 0.0);
 // the original's separate horizontal+vertical Gaussian blur passes.
 const BLOOM_THRESHOLD: f32 = 0.35;
 const BLOOM_INTENSITY: f32 = 0.55;
-const BLOOM_RADIUS_PX: f32 = 1.0;
+const BLOOM_RADIUS_PX: f32 = 1.5;
 // Vignette: `16xy(1-x)(1-y)` peaks at 1.0 in the center, 0 at edges.
 // Multiplied by VIG_GAIN for the lit-phosphor punch in the screen body.
 const VIG_GAIN:  f32 = 1.6;
@@ -237,7 +237,7 @@ fn fs_main(in: VsOut) -> FsOut {
 
     // Saturation bias — original uses (0.95, 1.05, 0.95) for the green
     // phosphor cast. Faithful match here.
-    col *= vec3<f32>(0.95, 1.05, 0.95);
+    col *= vec3<f32>(0.95, 1.05, 1.05);
 
     // Polynomial color curve, ported verbatim. Lifts midtones and
     // compresses to give the punchy phosphor response.
