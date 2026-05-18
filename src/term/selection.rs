@@ -29,13 +29,22 @@ impl Selection {
     fn normalized_range(&self, term: &Term) -> (usize, u16, usize, u16) {
         // Tuple ordering: line dominant, column secondary — the head can
         // be lexicographically before or after the anchor.
-        let (sl, sc, el, ec) = if (self.anchor_line, self.anchor_col)
-            <= (self.head_line, self.head_col)
-        {
-            (self.anchor_line, self.anchor_col, self.head_line, self.head_col)
-        } else {
-            (self.head_line, self.head_col, self.anchor_line, self.anchor_col)
-        };
+        let (sl, sc, el, ec) =
+            if (self.anchor_line, self.anchor_col) <= (self.head_line, self.head_col) {
+                (
+                    self.anchor_line,
+                    self.anchor_col,
+                    self.head_line,
+                    self.head_col,
+                )
+            } else {
+                (
+                    self.head_line,
+                    self.head_col,
+                    self.anchor_line,
+                    self.anchor_col,
+                )
+            };
         match self.mode {
             SelectionMode::Char => {
                 // ec is the column the user clicked on — include it.
@@ -46,7 +55,12 @@ impl Selection {
             SelectionMode::Word => {
                 let word_start = expand_word_start(term, sl, sc);
                 let word_end = expand_word_end(term, el, ec);
-                (sl, word_start, el, word_end.saturating_add(1).min(term.cols))
+                (
+                    sl,
+                    word_start,
+                    el,
+                    word_end.saturating_add(1).min(term.cols),
+                )
             }
         }
     }
@@ -79,7 +93,9 @@ fn word_class(c: char) -> u8 {
 }
 
 fn expand_word_start(term: &Term, line: usize, col: u16) -> u16 {
-    let Some(start_cell) = term.cell_at_global(line, col) else { return col };
+    let Some(start_cell) = term.cell_at_global(line, col) else {
+        return col;
+    };
     let class = word_class(start_cell.ch);
     if class == 0 {
         return col;
@@ -95,7 +111,9 @@ fn expand_word_start(term: &Term, line: usize, col: u16) -> u16 {
 }
 
 fn expand_word_end(term: &Term, line: usize, col: u16) -> u16 {
-    let Some(start_cell) = term.cell_at_global(line, col) else { return col };
+    let Some(start_cell) = term.cell_at_global(line, col) else {
+        return col;
+    };
     let class = word_class(start_cell.ch);
     if class == 0 {
         return col;
@@ -143,7 +161,9 @@ impl Term {
     /// position. Wide-char continuation cells inherit from the left half so
     /// the highlight doesn't break in the middle of a glyph.
     pub fn cell_in_selection(&self, x: u16, y: u16) -> bool {
-        let Some(sel) = self.selection else { return false };
+        let Some(sel) = self.selection else {
+            return false;
+        };
         let line = self.screen_to_global_line(y);
         if sel.contains_cell(line, x, self) {
             return true;
@@ -233,4 +253,3 @@ impl Term {
         if out.is_empty() { None } else { Some(out) }
     }
 }
-

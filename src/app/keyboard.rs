@@ -77,7 +77,8 @@ impl App {
         let scale = w.scale_factor();
         let pad = config().window.padding as f64;
         let x = self.term.cur_x as f64 * r.cell_width as f64 / scale + pad;
-        let y = (self.term.cur_y as f64 * r.line_height as f64 + r.line_height as f64) / scale + pad;
+        let y =
+            (self.term.cur_y as f64 * r.line_height as f64 + r.line_height as f64) / scale + pad;
         let cell_w = r.cell_width as f64 / scale;
         let cell_h = r.line_height as f64 / scale;
         w.set_ime_cursor_area(

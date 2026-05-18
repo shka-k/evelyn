@@ -11,9 +11,9 @@ use std::hash::{Hash, Hasher};
 
 use anyhow::Result;
 use glyphon::{
-    cosmic_text::{FeatureTag, FontFeatures, fontdb, Fallback, PlatformFallback},
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
+    cosmic_text::{Fallback, FeatureTag, FontFeatures, PlatformFallback, fontdb},
 };
 use unicode_script::Script;
 use wgpu::MultisampleState;
@@ -21,7 +21,10 @@ use wgpu::MultisampleState;
 use crate::color::{Rgb, cursor_color, cursor_text_color, default_fg};
 use crate::config::config as live_config;
 
-use super::{BUNDLED_FONT_NAME, FONT_PRIMARY_BOLD_BYTES, FONT_PRIMARY_REGULAR_BYTES, PreeditMetrics, Run, TextEngine};
+use super::{
+    BUNDLED_FONT_NAME, FONT_PRIMARY_BOLD_BYTES, FONT_PRIMARY_REGULAR_BYTES, PreeditMetrics, Run,
+    TextEngine,
+};
 
 pub struct CosmicEngine {
     font_system: FontSystem,
@@ -263,9 +266,9 @@ impl TextEngine for CosmicEngine {
         let base = font_attrs();
         for j in misses {
             let run = &new_runs[j];
-            let mut buf = leftover
-                .pop()
-                .unwrap_or_else(|| make_buffer(&mut self.font_system, self.font_size, self.line_height));
+            let mut buf = leftover.pop().unwrap_or_else(|| {
+                make_buffer(&mut self.font_system, self.font_size, self.line_height)
+            });
             // Unbounded width so a row run never wraps internally; a
             // stale buffer width after a window resize would otherwise
             // cause the overflow to render as a second line in the cell
@@ -601,7 +604,9 @@ struct EvelynFallback {
 
 impl EvelynFallback {
     fn new() -> Self {
-        Self { inner: PlatformFallback }
+        Self {
+            inner: PlatformFallback,
+        }
     }
 }
 

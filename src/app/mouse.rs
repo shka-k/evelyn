@@ -52,7 +52,9 @@ impl App {
                 MouseButton::Right => 2,
                 _ => return,
             };
-            let Some(r) = self.renderer.as_ref() else { return };
+            let Some(r) = self.renderer.as_ref() else {
+                return;
+            };
             let (col1, row1) = r.pixel_to_cell(pos.x, pos.y);
             match state {
                 ElementState::Pressed => {
@@ -77,7 +79,9 @@ impl App {
         if button != MouseButton::Left {
             return;
         }
-        let Some((line, col)) = self.cursor_to_global(pos) else { return };
+        let Some((line, col)) = self.cursor_to_global(pos) else {
+            return;
+        };
 
         match state {
             ElementState::Pressed => {
@@ -93,7 +97,12 @@ impl App {
                     }
                     _ => 1,
                 };
-                self.last_click = Some(ClickRecord { line, col, at: now, count });
+                self.last_click = Some(ClickRecord {
+                    line,
+                    col,
+                    at: now,
+                    count,
+                });
                 let mode = match count {
                     2 => SelectionMode::Word,
                     3 => SelectionMode::Line,
@@ -133,7 +142,9 @@ impl App {
         // reports motion regardless. CursorMoved fires per pixel, so dedup
         // at cell granularity to avoid spamming the app.
         if tracking && !shift {
-            let Some(r) = self.renderer.as_ref() else { return };
+            let Some(r) = self.renderer.as_ref() else {
+                return;
+            };
             let (col1, row1) = r.pixel_to_cell(position.x, position.y);
             if self.last_reported_cell == Some((col1, row1)) {
                 return;
@@ -159,7 +170,9 @@ impl App {
         if !self.mouse_left_held {
             return;
         }
-        let Some((line, col)) = self.cursor_to_global(position) else { return };
+        let Some((line, col)) = self.cursor_to_global(position) else {
+            return;
+        };
         self.term.update_selection(line, col);
         if self.term.dirty {
             self.request_redraw();
@@ -178,11 +191,7 @@ impl App {
                     .as_ref()
                     .map(|r| r.line_height as f64)
                     .unwrap_or(16.0);
-                if lh > 0.0 {
-                    (p.y / lh) as f32
-                } else {
-                    0.0
-                }
+                if lh > 0.0 { (p.y / lh) as f32 } else { 0.0 }
             }
         };
         // Accumulate sub-line trackpad scrolls so a slow drag still moves.
@@ -210,7 +219,11 @@ impl App {
             } else {
                 (b'B', (-step) as usize)
             };
-            let intro: u8 = if self.term.app_cursor_keys { b'O' } else { b'[' };
+            let intro: u8 = if self.term.app_cursor_keys {
+                b'O'
+            } else {
+                b'['
+            };
             let mut bytes = Vec::with_capacity(count * 3);
             for _ in 0..count {
                 bytes.extend_from_slice(&[0x1b, intro, byte]);

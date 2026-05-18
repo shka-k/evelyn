@@ -87,7 +87,7 @@ pub struct Term {
     /// print, and any cursor motion (CR/LF/BS/CUP/…) cancels it. Without
     /// this, drawing a box-corner glyph at (rows-1, cols-1) would scroll
     /// the whole screen — zellij/vim/tmux all rely on the deferral.
-pending_wrap: bool,
+    pending_wrap: bool,
     /// Bytes the terminal needs to send back to the host program (DA, DSR, …).
     /// Drained by the application after each parser advance.
     pub replies: Vec<u8>,
@@ -101,18 +101,18 @@ pending_wrap: bool,
     /// DECSTBM scroll region — top/bottom row indices, inclusive, in [0, rows).
     /// Default covers the whole screen. Apps like zellij set per-pane regions
     /// so an LF at the pane bottom only scrolls that band, not the whole grid.
-scroll_top: u16,
-scroll_bot: u16,
+    scroll_top: u16,
+    scroll_bot: u16,
     /// `\\e7` / CSI s. zellij saves cursor + attrs, draws its UI, then
     /// restores so the inner shell's next byte lands where it expects.
-saved_cursor: Option<SavedCursor>,
+    saved_cursor: Option<SavedCursor>,
     /// Snapshot of the main screen kept while we're in alt screen
     /// (`\\e[?1049h`). On exit (`\\e[?1049l`) we restore it.
-saved: Option<SavedScreen>,
+    saved: Option<SavedScreen>,
     /// Scrollback buffer — rows that have rolled off the top of the main
     /// screen. Each entry is exactly `cols` cells wide; `cols` mismatches
     /// (window resize) clear the buffer rather than reflowing.
-history: VecDeque<Vec<Cell>>,
+    history: VecDeque<Vec<Cell>>,
     /// Lines the viewport is shifted up from the live bottom, in [0, history.len()].
     /// 0 means we're showing the live screen.
     pub view_offset: usize,
@@ -122,7 +122,7 @@ history: VecDeque<Vec<Cell>>,
     /// rolling history doesn't shift the indices of younger lines, so a
     /// selection captured before a burst of output still highlights the same
     /// content. Monotonic; never reset.
-history_dropped: usize,
+    history_dropped: usize,
     /// Active mouse / keyboard selection, if any. Anchored in global line
     /// coordinates so it survives history rolling and scrollback navigation.
     pub selection: Option<Selection>,
@@ -134,13 +134,13 @@ history_dropped: usize,
     /// DEC Special Graphics with `ESC ( 0` to draw box borders, then back
     /// with `ESC ( B`. Without honoring this the border characters render
     /// as raw `qqq…` / `xxx…` ASCII.
-charset_g0: Charset,
-charset_g1: Charset,
+    charset_g0: Charset,
+    charset_g1: Charset,
     /// Which of G0/G1 is currently mapped to GL — flipped by SI (0x0F → G0)
     /// and SO (0x0E → G1). Most apps stay on G0 and toggle the *designation*
     /// instead, but ncurses drives borders via SO/SI on terminals where
     /// that's cheaper.
-active_charset: u8,
+    active_charset: u8,
 }
 
 impl Term {
@@ -210,8 +210,7 @@ impl Term {
             for i in 0..copy_rows {
                 let src = (src_row_start + i) * old_cols;
                 let dst = (dst_row_start + i) * new_cols;
-                new_cells[dst..dst + copy_cols]
-                    .copy_from_slice(&self.cells[src..src + copy_cols]);
+                new_cells[dst..dst + copy_cols].copy_from_slice(&self.cells[src..src + copy_cols]);
             }
             if self.saved.is_none() && src_row_start > 0 {
                 for i in 0..src_row_start {
@@ -312,7 +311,7 @@ impl Term {
         self.cells.get(screen_y * cols + c).copied()
     }
 
-fn idx(&self, x: u16, y: u16) -> usize {
+    fn idx(&self, x: u16, y: u16) -> usize {
         (y as usize) * (self.cols as usize) + (x as usize)
     }
 
@@ -367,7 +366,7 @@ fn idx(&self, x: u16, y: u16) -> usize {
 
     /// A blank cell carrying the current SGR attributes — what `\\e[K` and
     /// `\\e[J` should leave behind so colored erase actually paints.
-fn blank_cell(&self) -> Cell {
+    fn blank_cell(&self) -> Cell {
         Cell {
             ch: ' ',
             fg: self.fg,

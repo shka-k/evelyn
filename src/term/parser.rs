@@ -1,6 +1,6 @@
 use vte::{Params, Perform};
 
-use crate::color::{cursor_color, default_bg, default_fg, Color, Rgb};
+use crate::color::{Color, Rgb, cursor_color, default_bg, default_fg};
 use crate::config::CursorShape;
 
 use super::{Charset, Term};
@@ -52,7 +52,8 @@ impl Perform for Term {
             b'8' => self.restore_cursor(), // DECRC
             b'M' => self.reverse_index(),  // RI: scroll within region if at top
             b'D' => self.line_feed(),      // IND: like LF
-            b'E' => {                      // NEL: CR + LF
+            b'E' => {
+                // NEL: CR + LF
                 self.carriage_return();
                 self.line_feed();
             }
@@ -62,9 +63,15 @@ impl Perform for Term {
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         let term_seq: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
-        let Some(num_bytes) = params.first() else { return };
-        let Ok(num_str) = std::str::from_utf8(num_bytes) else { return };
-        let Ok(base) = num_str.parse::<u32>() else { return };
+        let Some(num_bytes) = params.first() else {
+            return;
+        };
+        let Ok(num_str) = std::str::from_utf8(num_bytes) else {
+            return;
+        };
+        let Ok(base) = num_str.parse::<u32>() else {
+            return;
+        };
         // OSC 52 — clipboard set/query. Format is `OSC 52 ; <sel> ; <data> ST`
         // where <sel> is any combo of c/p/s/q/0-7 (we treat them all as the
         // single macOS pasteboard) and <data> is base64-encoded text, or `?`
@@ -110,7 +117,11 @@ impl Perform for Term {
         // (or no param) resets to the user's configured default; we encode
         // that as clearing the override. Unknown values are ignored.
         if intermediates == b" " && action == 'q' {
-            let ps = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
+            let ps = params
+                .iter()
+                .next()
+                .and_then(|p| p.first().copied())
+                .unwrap_or(0);
             self.cursor_style = match ps {
                 0 => None,
                 1 => Some((CursorShape::Block, true)),
@@ -136,9 +147,27 @@ impl Perform for Term {
                     // previous; resetting any clears tracking entirely
                     // (xterm semantics — apps reset whichever mode they
                     // set, and shouldn't end up with a stale level).
-                    1000 => self.mouse_proto = if on { super::MouseProto::Press } else { super::MouseProto::Off },
-                    1002 => self.mouse_proto = if on { super::MouseProto::Button } else { super::MouseProto::Off },
-                    1003 => self.mouse_proto = if on { super::MouseProto::Any } else { super::MouseProto::Off },
+                    1000 => {
+                        self.mouse_proto = if on {
+                            super::MouseProto::Press
+                        } else {
+                            super::MouseProto::Off
+                        }
+                    }
+                    1002 => {
+                        self.mouse_proto = if on {
+                            super::MouseProto::Button
+                        } else {
+                            super::MouseProto::Off
+                        }
+                    }
+                    1003 => {
+                        self.mouse_proto = if on {
+                            super::MouseProto::Any
+                        } else {
+                            super::MouseProto::Off
+                        }
+                    }
                     1006 => self.mouse_sgr = on,
                     2004 => self.bracketed_paste = on,
                     1047 | 1049 => {
@@ -160,8 +189,16 @@ impl Perform for Term {
             'm' => sgr(self, params),
             'H' | 'f' => {
                 let mut it = params.iter();
-                let row = it.next().and_then(|p| p.first().copied()).unwrap_or(1).max(1);
-                let col = it.next().and_then(|p| p.first().copied()).unwrap_or(1).max(1);
+                let row = it
+                    .next()
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1)
+                    .max(1);
+                let col = it
+                    .next()
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1)
+                    .max(1);
                 self.cur_y = (row - 1).min(self.rows.saturating_sub(1));
                 self.cur_x = (col - 1).min(self.cols.saturating_sub(1));
                 self.pending_wrap = false;
@@ -204,11 +241,19 @@ impl Perform for Term {
                 self.dirty = true;
             }
             'J' => {
-                let mode = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
+                let mode = params
+                    .iter()
+                    .next()
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(0);
                 self.erase_in_display(mode);
             }
             'K' => {
-                let mode = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
+                let mode = params
+                    .iter()
+                    .next()
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(0);
                 self.erase_in_line(mode);
             }
             's' => self.save_cursor(),
@@ -217,7 +262,11 @@ impl Perform for Term {
                 // DECSTBM: top;bottom in 1-based row indices. Both omitted
                 // means reset region to the full screen.
                 let mut it = params.iter();
-                let top = it.next().and_then(|p| p.first().copied()).unwrap_or(1).max(1);
+                let top = it
+                    .next()
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1)
+                    .max(1);
                 let bot = it
                     .next()
                     .and_then(|p| p.first().copied())
@@ -362,7 +411,11 @@ fn sgr(term: &mut Term, params: &Params) {
                     if kind == 5 {
                         if let Some(&n) = flat.get(i + 2) {
                             let c = Color::Indexed(n as u8);
-                            if p == 38 { term.fg = c; } else { term.bg = c; }
+                            if p == 38 {
+                                term.fg = c;
+                            } else {
+                                term.bg = c;
+                            }
                             i += 2;
                         }
                     } else if kind == 2
@@ -370,7 +423,11 @@ fn sgr(term: &mut Term, params: &Params) {
                             (flat.get(i + 2), flat.get(i + 3), flat.get(i + 4))
                     {
                         let c = Color::Rgb(Rgb(r as u8, g as u8, b as u8));
-                        if p == 38 { term.fg = c; } else { term.bg = c; }
+                        if p == 38 {
+                            term.fg = c;
+                        } else {
+                            term.bg = c;
+                        }
                         i += 4;
                     }
                 }

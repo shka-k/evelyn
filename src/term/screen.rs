@@ -32,7 +32,9 @@ impl Term {
             return;
         }
         let cur = self.view_offset as i64;
-        let new = (cur + delta_lines as i64).max(0).min(self.history.len() as i64);
+        let new = (cur + delta_lines as i64)
+            .max(0)
+            .min(self.history.len() as i64);
         let new = new as usize;
         if new != self.view_offset {
             self.view_offset = new;

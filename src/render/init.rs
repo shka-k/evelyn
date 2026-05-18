@@ -26,8 +26,7 @@ pub(super) fn init_gpu(window: &Arc<Window>) -> Result<GpuInit> {
         compatible_surface: Some(&surface),
         force_fallback_adapter: false,
     }))?;
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&DeviceDescriptor::default()))?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&DeviceDescriptor::default()))?;
     let caps = surface.get_capabilities(&adapter);
     let format = caps
         .formats
@@ -46,7 +45,13 @@ pub(super) fn init_gpu(window: &Arc<Window>) -> Result<GpuInit> {
         desired_maximum_frame_latency: 2,
     };
     surface.configure(&device, &config);
-    Ok(GpuInit { device, queue, surface, config, format })
+    Ok(GpuInit {
+        device,
+        queue,
+        surface,
+        config,
+        format,
+    })
 }
 
 pub(super) fn metrics_for(scale: f32) -> (f32, f32) {

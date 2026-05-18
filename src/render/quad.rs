@@ -126,12 +126,30 @@ impl QuadPipeline {
             let y0 = 1.0 - q.y / viewport_h * 2.0;
             let y1 = 1.0 - (q.y + q.h) / viewport_h * 2.0;
             let c = q.color;
-            verts.push(Vert { pos: [x0, y0], color: c });
-            verts.push(Vert { pos: [x1, y0], color: c });
-            verts.push(Vert { pos: [x0, y1], color: c });
-            verts.push(Vert { pos: [x1, y0], color: c });
-            verts.push(Vert { pos: [x1, y1], color: c });
-            verts.push(Vert { pos: [x0, y1], color: c });
+            verts.push(Vert {
+                pos: [x0, y0],
+                color: c,
+            });
+            verts.push(Vert {
+                pos: [x1, y0],
+                color: c,
+            });
+            verts.push(Vert {
+                pos: [x0, y1],
+                color: c,
+            });
+            verts.push(Vert {
+                pos: [x1, y0],
+                color: c,
+            });
+            verts.push(Vert {
+                pos: [x1, y1],
+                color: c,
+            });
+            verts.push(Vert {
+                pos: [x0, y1],
+                color: c,
+            });
         }
 
         let needed = verts.len() as u64;

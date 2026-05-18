@@ -1,8 +1,8 @@
 use crate::color::Color;
 use crate::width::cell_width;
 
-use super::{Cell, Term};
 use super::charset::{Charset, dec_special_graphics};
+use super::{Cell, Term};
 
 impl Term {
     pub(super) fn reset_attrs(&mut self) {
@@ -140,7 +140,8 @@ impl Term {
         let move_src_end = row_end - n;
         let move_src_start = row_start + cur;
         if move_src_start < move_src_end {
-            self.cells.copy_within(move_src_start..move_src_end, move_src_start + n);
+            self.cells
+                .copy_within(move_src_start..move_src_end, move_src_start + n);
         }
         let blank = self.blank_cell();
         for cell in &mut self.cells[move_src_start..move_src_start + n] {

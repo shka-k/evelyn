@@ -3,21 +3,21 @@
 //! writes a copy of its output into a ping-pong "history" texture so the
 //! next frame can sample it as phosphor afterglow.
 
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
-    BlendState, Buffer, BufferBindingType, BufferUsages, ColorTargetState, ColorWrites,
-    CommandEncoder, CommandEncoderDescriptor, Device, Extent3d, FilterMode, FragmentState,
-    LoadOp, MipmapFilterMode, MultisampleState, Operations, PipelineLayoutDescriptor,
-    PrimitiveState, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
+    Buffer, BufferBindingType, BufferUsages, ColorTargetState, ColorWrites, CommandEncoder,
+    CommandEncoderDescriptor, Device, Extent3d, FilterMode, FragmentState, LoadOp,
+    MipmapFilterMode, MultisampleState, Operations, PipelineLayoutDescriptor, PrimitiveState,
+    Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
     RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
     ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Texture, TextureDescriptor,
     TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
     TextureViewDescriptor, TextureViewDimension, VertexState,
 };
-use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
-use crate::color::{default_bg, Rgb};
+use crate::color::{Rgb, default_bg};
 
 /// Per-frame metrics the CRT shader needs. `dpi_scale` keeps physical-px
 /// effects (bloom radius, chromatic split, scanlines, shadow mask) at a
@@ -223,7 +223,8 @@ impl PostProcessor {
         if width == self.width && height == self.height {
             return;
         }
-        let (texture, view) = create_offscreen(device, self.format, width, height, "post-offscreen");
+        let (texture, view) =
+            create_offscreen(device, self.format, width, height, "post-offscreen");
         self.texture = texture;
         self.view = view;
 

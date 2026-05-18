@@ -64,9 +64,7 @@ fn binary_path_for(pid: u32, procs: &Processes) -> String {
     if let Some(path) = socket_probe::executable_path(pid, "zellij") {
         return path;
     }
-    if let Some(argv0) = procs
-        .command(pid)
-        .and_then(|c| c.split_whitespace().next())
+    if let Some(argv0) = procs.command(pid).and_then(|c| c.split_whitespace().next())
         && argv0.starts_with('/')
     {
         return argv0.to_string();

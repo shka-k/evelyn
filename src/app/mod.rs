@@ -68,66 +68,66 @@ pub fn run() -> Result<()> {
 }
 
 pub(super) struct App {
-proxy: EventLoopProxy<UserEvent>,
-window: Option<Arc<Window>>,
-renderer: Option<Renderer>,
-term: Term,
-parser: Parser,
-pty: Option<Pty>,
-modifiers: Modifiers,
-preedit: String,
+    proxy: EventLoopProxy<UserEvent>,
+    window: Option<Arc<Window>>,
+    renderer: Option<Renderer>,
+    term: Term,
+    parser: Parser,
+    pty: Option<Pty>,
+    modifiers: Modifiers,
+    preedit: String,
     /// Caret byte offset into `preedit` reported by the IME. Falls back to
     /// the end of the string when the platform doesn't supply one, so the
     /// rendered cursor still sits past the last composed char.
-preedit_cursor: usize,
+    preedit_cursor: usize,
     /// Sub-line wheel delta accumulator — trackpads send fractional lines
     /// per event, and dropping the fraction would freeze slow scrolls.
-scroll_accum: f32,
+    scroll_accum: f32,
     /// Last seen cursor position in physical window pixels. Updated from
     /// CursorMoved; used to attach a (col, row) to wheel events when the
     /// app has mouse tracking on. None until the cursor enters the window.
-cursor_pos: Option<PhysicalPosition<f64>>,
+    cursor_pos: Option<PhysicalPosition<f64>>,
     /// Held to keep the file watcher alive — drop = unwatch. We don't
     /// interact with it after spawn; the callback owns the proxy clone.
-_config_watcher: Option<RecommendedWatcher>,
+    _config_watcher: Option<RecommendedWatcher>,
     /// Timestamp of the last reload, used to debounce bursty save events
     /// (e.g. editors that write to a temp file and rename).
-last_reload: Option<Instant>,
+    last_reload: Option<Instant>,
     /// Current phase of the configured cursor blink. Always `true` when
     /// blink is disabled in config — we just stop toggling it.
-cursor_blink_on: bool,
+    cursor_blink_on: bool,
     /// When the blink phase was last flipped. `about_to_wait` schedules
     /// the next flip relative to this so the half-period is stable
     /// regardless of how often other events fire.
-cursor_blink_last_toggle: Instant,
+    cursor_blink_last_toggle: Instant,
     /// Left mouse button is currently held — drives drag-to-extend on
     /// `CursorMoved`. Released by either MouseInput::Released or window
     /// focus loss. (CursorLeft alone doesn't release: a drag past the
     /// edge keeps the button down.)
-mouse_left_held: bool,
+    mouse_left_held: bool,
     /// A button press was forwarded to the PTY rather than starting a
     /// native selection — set when the foreground app has mouse tracking
     /// on and Shift isn't held at press time. Cleared on Released so
     /// drag/motion forwarding tracks the same path the press took.
-mouse_forwarding: bool,
+    mouse_forwarding: bool,
     /// Last cell forwarded to the PTY as a motion report. Used to dedup
     /// CursorMoved events, which fire per-pixel — without this we'd spam
     /// the app with redundant reports for the same cell.
-last_reported_cell: Option<(u16, u16)>,
+    last_reported_cell: Option<(u16, u16)>,
     /// Last left-click for double / triple-click detection. Same global
     /// cell within the timeout escalates Char → Word → Line; anywhere
     /// else, or after the timeout, resets to a fresh single click.
-last_click: Option<ClickRecord>,
+    last_click: Option<ClickRecord>,
     /// Window focus state. While `false` we don't arm blink wakeups (the
     /// cursor holds at "on" and the renderer paints it as a hollow
     /// outline so it's still locatable). Rendering itself keeps running
     /// — a TUI scrolling logs in the background should still update.
-focused: bool,
+    focused: bool,
     /// When the first byte in the current pending batch arrived. `None`
     /// while the PTY-side buffer is empty; set on the wake event that
     /// transitions it from empty → non-empty so the deadline is measured
     /// from the oldest queued byte, not the newest.
-pty_first_arrival: Option<Instant>,
+    pty_first_arrival: Option<Instant>,
 }
 
 impl App {
@@ -157,7 +157,7 @@ impl App {
         }
     }
 
-fn request_redraw(&self) {
+    fn request_redraw(&self) {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -165,8 +165,10 @@ fn request_redraw(&self) {
 
     /// Re-read the renderer's grid size and propagate to Term + PTY when it
     /// changed. Called from both Resized and ScaleFactorChanged.
-fn sync_grid(&mut self) {
-        let Some(r) = self.renderer.as_ref() else { return };
+    fn sync_grid(&mut self) {
+        let Some(r) = self.renderer.as_ref() else {
+            return;
+        };
         let (cols, rows) = r.grid_size();
         if cols != self.term.cols || rows != self.term.rows {
             self.term.resize(cols, rows);

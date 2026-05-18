@@ -145,9 +145,5 @@ fn encode_chars(text: &str, ctrl: bool, alt: bool) -> Option<Vec<u8>> {
         }
     }
     out.extend_from_slice(text.as_bytes());
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
