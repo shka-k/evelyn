@@ -34,13 +34,26 @@ pub(super) fn init_gpu(window: &Arc<Window>) -> Result<GpuInit> {
         .copied()
         .find(|f| f.is_srgb())
         .unwrap_or(caps.formats[0]);
+    // Prefer PostMultiplied so the surface alpha we write (using straight
+    // ALPHA_BLENDING) composites with the desktop when window.opacity < 1.
+    // Falls back to whatever the platform picks, which on Opaque-only
+    // platforms simply ignores the alpha and stays solid.
+    let alpha_mode = [
+        CompositeAlphaMode::PostMultiplied,
+        CompositeAlphaMode::PreMultiplied,
+        CompositeAlphaMode::Inherit,
+        CompositeAlphaMode::Auto,
+    ]
+    .into_iter()
+    .find(|m| caps.alpha_modes.contains(m))
+    .unwrap_or(CompositeAlphaMode::Auto);
     let config = SurfaceConfiguration {
         usage: TextureUsages::RENDER_ATTACHMENT,
         format,
         width: size.width.max(1),
         height: size.height.max(1),
         present_mode: PresentMode::Fifo,
-        alpha_mode: CompositeAlphaMode::Auto,
+        alpha_mode,
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };

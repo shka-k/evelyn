@@ -176,6 +176,7 @@ impl Renderer {
         term: &Term,
         y: u16,
         screen_bg: Rgb,
+        bg_alpha: f32,
         mask: Option<(u16, u16, u16)>,
         out: &mut Vec<Rect>,
     ) {
@@ -208,7 +209,7 @@ impl Renderer {
                     y: y as f32 * self.line_height + self.padding,
                     w: (end - x) as f32 * self.cell_width,
                     h: self.line_height,
-                    color: rgb_to_rgba(bg, 1.0),
+                    color: rgb_to_rgba(bg, bg_alpha),
                 });
             }
             x = end;

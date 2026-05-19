@@ -1,11 +1,11 @@
 use crate::color::Rgb;
 
-pub(super) fn clear_color_for(bg: Rgb) -> wgpu::Color {
+pub(super) fn clear_color_for_with_alpha(bg: Rgb, a: f32) -> wgpu::Color {
     wgpu::Color {
         r: srgb_to_linear(bg.0),
         g: srgb_to_linear(bg.1),
         b: srgb_to_linear(bg.2),
-        a: 1.0,
+        a: a.clamp(0.0, 1.0) as f64,
     }
 }
 

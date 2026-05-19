@@ -18,7 +18,7 @@ use crate::color::default_bg;
 use crate::config::{CursorShape, config as live_config, resolve_shader_source};
 use crate::term::Term;
 
-use convert::clear_color_for;
+use convert::clear_color_for_with_alpha;
 use init::{GpuInit, init_gpu, metrics_for};
 use post::{Metrics, PostProcessor};
 use quad::{QuadPipeline, Rect};
@@ -41,6 +41,10 @@ struct BgCacheKey {
     cell_width_q: i32,
     line_height_q: i32,
     padding_q: i32,
+    // Quantized bg alpha (1/1000 units). Baked into each cached Rect's
+    // color, so a change to window.opacity (when the shader is off) has
+    // to invalidate every row's quad list.
+    bg_alpha_q: i32,
 }
 
 /// Per-row bg-quad cache. `rows[y]` holds the rects for screen row `y`;
@@ -354,6 +358,14 @@ impl Renderer {
         // a tiny color step at the cell-grid edge for apps that paint a
         // non-default bg. The corner vignette mostly hides it.
         let screen_bg = default_bg();
+        // window.opacity applies only when no post-process shader is
+        // active — the post pass writes alpha = 1.0 across the whole
+        // surface, so any transparency would just be repainted over.
+        let bg_alpha = if self.post.is_some() {
+            1.0
+        } else {
+            live_config().window.opacity.clamp(0.0, 1.0)
+        };
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor { label: None });
@@ -365,7 +377,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(clear_color_for(screen_bg)),
+                        load: LoadOp::Clear(clear_color_for_with_alpha(screen_bg, bg_alpha)),
                         store: StoreOp::Store,
                     },
                 })],
@@ -381,7 +393,7 @@ impl Renderer {
             // between bg and cursor so an active drag still shows the
             // cursor block, and is alpha-blended so colored cell bgs
             // remain readable underneath.
-            let mut quads = self.collect_bg_quads(term, screen_bg, preedit_mask);
+            let mut quads = self.collect_bg_quads(term, screen_bg, bg_alpha, preedit_mask);
             quads.extend_from_slice(&self.build_selection_quads(term));
             quads.extend_from_slice(&overlay);
             self.quads.draw(
@@ -415,6 +427,7 @@ impl Renderer {
         &mut self,
         term: &Term,
         screen_bg: Rgb,
+        bg_alpha: f32,
         mask: Option<(u16, u16, u16)>,
     ) -> Vec<Rect> {
         let rows = term.rows as usize;
@@ -429,6 +442,7 @@ impl Renderer {
             cell_width_q: (self.cell_width * 100.0).round() as i32,
             line_height_q: (self.line_height * 100.0).round() as i32,
             padding_q: (self.padding * 100.0).round() as i32,
+            bg_alpha_q: (bg_alpha * 1000.0).round() as i32,
         };
         let full_invalidate = self.bg_cache.key.as_ref() != Some(&key);
         if self.bg_cache.rows.len() != rows {
@@ -475,7 +489,7 @@ impl Renderer {
                 // back. Keeps the row's allocation alive across frames.
                 let mut row_buf = std::mem::take(&mut self.bg_cache.rows[y]);
                 row_buf.clear();
-                self.build_bg_quads_row(term, y as u16, screen_bg, mask, &mut row_buf);
+                self.build_bg_quads_row(term, y as u16, screen_bg, bg_alpha, mask, &mut row_buf);
                 self.bg_cache.rows[y] = row_buf;
                 self.bg_cache.valid[y] = true;
             }

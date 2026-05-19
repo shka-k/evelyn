@@ -63,6 +63,7 @@ ligatures = true
 
 [window]
 padding = 8.0                # logical points, all four sides
+opacity = 1.0                # 0.0–1.0; only applied when shader.enabled = false
 
 [shader]
 enabled = true

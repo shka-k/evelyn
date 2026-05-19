@@ -19,7 +19,10 @@ pub const FONT: FontConfig = FontConfig {
     ligatures: true,
 };
 
-pub const WINDOW: WindowConfig = WindowConfig { padding: 8.0 };
+pub const WINDOW: WindowConfig = WindowConfig {
+    padding: 8.0,
+    opacity: 1.0,
+};
 
 // `ShaderConfig::effect` is a `String` so the whole struct can't be const.
 // Section `Default` impl builds the struct from these two literals.

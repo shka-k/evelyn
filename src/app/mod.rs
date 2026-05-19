@@ -282,8 +282,14 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
+        // Always request a transparent-capable surface so a runtime
+        // `window.opacity < 1.0` (with shaders off) actually composites
+        // through to the desktop. Harmless at the default opacity = 1.0:
+        // the cleared bg + opaque post-pass output leaves the window
+        // looking solid.
         let mut attrs = WindowAttributes::default()
             .with_title(WINDOW_TITLE)
+            .with_transparent(true)
             .with_inner_size(LogicalSize::new(
                 INITIAL_WINDOW_SIZE_LOGICAL.0,
                 INITIAL_WINDOW_SIZE_LOGICAL.1,
