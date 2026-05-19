@@ -196,24 +196,33 @@ impl Term {
             }
         }
 
-        // Bottom-align the live grid into the new buffer so the prompt stays
-        // anchored at the bottom edge. When shrinking rows, the displaced top
-        // rows of the main screen become scrollback; alt-screen scroll-off
-        // is dropped (history belongs to the shell underneath).
+        // Top-align the live grid into the new buffer so the cursor stays at
+        // its current screen row — bottom-align dropped the prompt into the
+        // middle of the window when growing a screen that wasn't already
+        // filled to the bottom. On shrink, push just enough top rows into
+        // scrollback to keep the cursor on-screen; alt-screen scroll-off is
+        // dropped (history belongs to the shell underneath).
         let mut new_cells = vec![Cell::default(); new_cols * new_rows];
         let mut cursor_shift: i32 = 0;
         if old_cols > 0 && old_rows > 0 {
-            let copy_rows = old_rows.min(new_rows);
-            let src_row_start = old_rows - copy_rows;
-            let dst_row_start = new_rows - copy_rows;
+            let cur_y = self.cur_y as usize;
+            let scroll_off = if new_rows == 0 {
+                old_rows
+            } else if cur_y >= new_rows {
+                (cur_y + 1 - new_rows).min(old_rows)
+            } else {
+                0
+            };
+            let copy_rows = (old_rows - scroll_off).min(new_rows);
+            let src_row_start = scroll_off;
             let copy_cols = old_cols.min(new_cols);
             for i in 0..copy_rows {
                 let src = (src_row_start + i) * old_cols;
-                let dst = (dst_row_start + i) * new_cols;
+                let dst = i * new_cols;
                 new_cells[dst..dst + copy_cols].copy_from_slice(&self.cells[src..src + copy_cols]);
             }
-            if self.saved.is_none() && src_row_start > 0 {
-                for i in 0..src_row_start {
+            if self.saved.is_none() && scroll_off > 0 {
+                for i in 0..scroll_off {
                     let src = i * old_cols;
                     let mut row: Vec<Cell> = self.cells[src..src + old_cols].to_vec();
                     row.resize(new_cols, Cell::default());
@@ -224,7 +233,7 @@ impl Term {
                     self.history.push_back(row);
                 }
             }
-            cursor_shift = dst_row_start as i32 - src_row_start as i32;
+            cursor_shift = -(scroll_off as i32);
         }
         self.cells = new_cells;
 
