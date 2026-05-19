@@ -72,7 +72,7 @@ const CURVATURE:       f32 = 2.0;  // newpixie default
 // glyphs got proportionally fewer chunks. Higher = smoother, lower =
 // chunkier. 14 ≈ what PIXEL_SIZE=2 used to give on Retina with the
 // default font.
-const CHUNKS_PER_CELL: f32 = 24.0;
+const CHUNKS_PER_CELL: f32 = 14.0;
 // 3-pixel shadow mask. Original slang used `1 - 0.23 * mod(x,3)/2`;
 // bumped to 0.3 for a more visible mask on modern high-DPI displays.
 const MASK_STRENGTH:   f32 = 0.3;
