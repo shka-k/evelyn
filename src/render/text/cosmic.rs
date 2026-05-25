@@ -616,10 +616,23 @@ impl Fallback for EvelynFallback {
         // ahead of Apple Color Emoji. STIX Two Math is the only stock
         // font that carries Unicode 6.0+ Misc Technical additions like
         // U+23FA (BLACK CIRCLE FOR RECORD); Apple Symbols handles the
-        // older ❤ ☎ ★ ☀ block.
+        // older ★ ☀ block.
+        //
+        // `Hiragino Sans` sits right after the Latin faces (.SF NS, Menlo)
+        // and *ahead* of Apple Symbols / Arial Unicode MS so the Common-
+        // script CJK glyphs that cosmic-text only ever routes here —
+        // fullwidth punctuation ！ ？ (U+FF01/U+FF1F) and the ideographic
+        // comma/period 、。— render as proper fullwidth Japanese glyphs.
+        // Without it ！？ landed on Apple Symbols (narrow symbol metrics,
+        // wrong size in a fullwidth cell) and 、。fell all the way to
+        // Arial Unicode MS. .SF NS / Menlo still win for anything they
+        // cover, and ⏺ (only in STIX) is unaffected since Hiragino lacks
+        // it; Hiragino comes before Apple Color Emoji so dingbats like
+        // ☎ ☀ stay monochrome.
         &[
             ".SF NS",
             "Menlo",
+            "Hiragino Sans",
             "Apple Symbols",
             "STIX Two Math",
             "Apple Color Emoji",
@@ -635,6 +648,16 @@ impl Fallback for EvelynFallback {
     fn script_fallback(&self, script: Script, locale: &str) -> &[&'static str] {
         match script {
             Script::Braille => &["Apple Braille"],
+            // Pin Japanese ideographs + kana to Hiragino Sans regardless of
+            // locale. cosmic-text's `han_unification` only matches a *bare*
+            // language tag ("ja"), but `sys_locale` hands it a BCP-47 region
+            // tag (here "en-JP"), so `Script::Han` fell through to the
+            // default arm → PingFang SC (Simplified Chinese). Meanwhile
+            // Hiragana/Katakana are hard-coded to "ja" upstream → Hiragino.
+            // Net effect: kana rendered in Hiragino but kanji in a lighter
+            // Chinese face, so mixed Japanese text looked uneven ("thin /
+            // small" kanji). Unifying all three on Hiragino Sans fixes it.
+            Script::Han | Script::Hiragana | Script::Katakana => &["Hiragino Sans"],
             _ => self.inner.script_fallback(script, locale),
         }
     }
