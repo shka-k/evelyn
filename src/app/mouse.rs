@@ -114,6 +114,8 @@ impl App {
             }
             ElementState::Released => {
                 self.mouse_left_held = false;
+                self.autoscroll = None;
+                self.autoscroll_deadline = None;
                 // A drag that produced any text → clipboard. A bare click
                 // (anchor == head) is a deselect signal: clear so the
                 // highlight goes away.
@@ -169,6 +171,28 @@ impl App {
 
         if !self.mouse_left_held {
             return;
+        }
+        // Arm / disarm edge auto-scroll: dragging above or below the grid
+        // sets a direction that `about_to_wait` repeats until the pointer
+        // comes back inside or the button releases. Inside the band we clear
+        // it and let the normal head update below handle the visible range.
+        if let Some(r) = self.renderer.as_ref() {
+            let dir = r.edge_scroll_dir(position.y);
+            if dir == 0 {
+                self.autoscroll = None;
+                self.autoscroll_deadline = None;
+            } else {
+                // Fire the first tick on the next wake; subsequent ticks pace
+                // themselves. Re-arming with the same dir keeps the pending
+                // deadline so the rate stays steady.
+                if self.autoscroll != Some(dir) {
+                    self.autoscroll = Some(dir);
+                    self.autoscroll_deadline = None;
+                }
+                // While past the edge, don't also apply the clamped in-view
+                // position — the tick owns head extension from here.
+                return;
+            }
         }
         let Some((line, col)) = self.cursor_to_global(position) else {
             return;
@@ -235,6 +259,18 @@ impl App {
             // Main screen → walk the scrollback view. Wheel up (+y) means
             // older content, which is +offset in our model.
             self.term.scroll_view(step);
+            // If a selection drag is in progress, extend the head to follow
+            // the content that just moved under the (stationary) cursor.
+            // Without this, scrolling during a drag leaves the head pinned to
+            // the rows visible when the drag began, so the selection — and
+            // thus the copy — caps at one screen's worth even as the user
+            // scrolls to reveal more.
+            if self.mouse_left_held
+                && let Some(pos) = self.cursor_pos
+                && let Some((line, col)) = self.cursor_to_global(pos)
+            {
+                self.term.update_selection(line, col);
+            }
             if self.term.dirty {
                 self.request_redraw();
             }

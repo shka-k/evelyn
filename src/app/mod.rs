@@ -44,6 +44,11 @@ pub(super) const IME_CANDIDATE_WIDTH_CELLS: f64 = 10.0;
 /// for every keystroke echo.
 const PTY_COALESCE_WINDOW: Duration = Duration::from_millis(8);
 
+/// One line of scrollback travel per this interval while a drag-select
+/// holds the pointer past the top/bottom edge. ~30 lines/sec — brisk enough
+/// to cross a screen quickly, slow enough to stop on a target row.
+const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(33);
+
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     /// The PTY reader appended bytes to its shared buffer. Carries no
@@ -105,6 +110,16 @@ pub(super) struct App {
     /// focus loss. (CursorLeft alone doesn't release: a drag past the
     /// edge keeps the button down.)
     mouse_left_held: bool,
+    /// Direction of drag-select edge auto-scroll while the pointer sits
+    /// above (`+1`) or below (`-1`) the grid with the button held; `None`
+    /// when the pointer is inside the grid or no drag is active. `about_to_wait`
+    /// consumes this to walk scrollback one line per `AUTOSCROLL_INTERVAL`
+    /// and extend the selection head, so a selection can span more than one
+    /// screen without the user having to also work the scroll wheel.
+    autoscroll: Option<i32>,
+    /// Next scheduled edge-auto-scroll tick. Kept alongside `autoscroll` so
+    /// the repeat paces itself across event-loop wakeups.
+    autoscroll_deadline: Option<Instant>,
     /// A button press was forwarded to the PTY rather than starting a
     /// native selection — set when the foreground app has mouse tracking
     /// on and Shift isn't held at press time. Cleared on Released so
@@ -149,6 +164,8 @@ impl App {
             cursor_blink_on: true,
             cursor_blink_last_toggle: Instant::now(),
             mouse_left_held: false,
+            autoscroll: None,
+            autoscroll_deadline: None,
             mouse_forwarding: false,
             last_reported_cell: None,
             last_click: None,
@@ -234,6 +251,8 @@ impl App {
             self.request_redraw();
         } else {
             self.mouse_left_held = false;
+            self.autoscroll = None;
+            self.autoscroll_deadline = None;
         }
     }
 
@@ -492,12 +511,39 @@ impl ApplicationHandler<UserEvent> for App {
             None
         };
 
-        match (pty_deadline, blink_deadline) {
-            (Some(p), Some(b)) => event_loop.set_control_flow(ControlFlow::WaitUntil(p.min(b))),
-            (Some(d), None) | (None, Some(d)) => {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(d))
+        // Edge auto-scroll tick: while a drag holds the pointer past the top
+        // or bottom edge, walk scrollback one line and drag the selection
+        // head to the row now under the (stationary) pointer, then reschedule.
+        let autoscroll_deadline = if let Some(dir) = self.autoscroll {
+            let next = self.autoscroll_deadline.unwrap_or(now);
+            if now >= next {
+                self.term.scroll_view(dir);
+                if let Some(pos) = self.cursor_pos
+                    && let Some((line, col)) = self.cursor_to_global(pos)
+                {
+                    self.term.update_selection(line, col);
+                }
+                if self.term.dirty {
+                    self.request_redraw();
+                }
+                let n = now + AUTOSCROLL_INTERVAL;
+                self.autoscroll_deadline = Some(n);
+                Some(n)
+            } else {
+                Some(next)
             }
-            (None, None) => event_loop.set_control_flow(ControlFlow::Wait),
+        } else {
+            None
+        };
+
+        // Wake at the earliest pending deadline, or sleep indefinitely if none.
+        let deadline = [pty_deadline, blink_deadline, autoscroll_deadline]
+            .into_iter()
+            .flatten()
+            .min();
+        match deadline {
+            Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(d)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 }

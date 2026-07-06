@@ -251,6 +251,26 @@ impl Renderer {
         (cx + 1, cy + 1)
     }
 
+    /// While drag-selecting, decide whether the pointer has left the grid
+    /// vertically so the view should auto-scroll to chase it. Returns `+1`
+    /// to scroll toward older content (pointer above the grid), `-1` toward
+    /// newer (pointer below the last row), and `0` while it's inside the row
+    /// band. Sign matches `Term::scroll_view`. Horizontal position is
+    /// ignored — only the vertical band gates scrollback travel.
+    pub fn edge_scroll_dir(&self, y: f64) -> i32 {
+        let (_, rows) = self.grid_size();
+        let top = self.padding;
+        let bottom = self.padding + rows as f32 * self.line_height;
+        let y = y as f32;
+        if y < top {
+            1
+        } else if y >= bottom {
+            -1
+        } else {
+            0
+        }
+    }
+
     pub fn render(
         &mut self,
         term: &Term,
