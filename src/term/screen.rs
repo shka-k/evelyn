@@ -67,9 +67,7 @@ impl Term {
             });
         }
         let blank = self.blank_cell();
-        for cell in &mut self.cells {
-            *cell = blank;
-        }
+        self.cells.fill(blank);
         self.cur_x = 0;
         self.cur_y = 0;
         // Don't carry the previous app's scroll region or saved cursor
@@ -99,9 +97,7 @@ impl Term {
             self.reverse = s.reverse;
         } else {
             let blank = self.blank_cell();
-            for cell in &mut self.cells {
-                *cell = blank;
-            }
+            self.cells.fill(blank);
             self.cur_x = 0;
             self.cur_y = 0;
         }

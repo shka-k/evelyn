@@ -4,6 +4,7 @@ mod editor;
 mod keyboard;
 mod mouse;
 mod multiplexer;
+mod titlebar;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -301,14 +302,11 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        // Always request a transparent-capable surface so a runtime
-        // `window.opacity < 1.0` (with shaders off) actually composites
-        // through to the desktop. Harmless at the default opacity = 1.0:
-        // the cleared bg + opaque post-pass output leaves the window
-        // looking solid.
+        // Start opaque; transparency is toggled on below (and on config
+        // reload) only when `window.opacity < 1.0` is actually in effect,
+        // see `Renderer::wants_transparent_window`.
         let mut attrs = WindowAttributes::default()
             .with_title(WINDOW_TITLE)
-            .with_transparent(true)
             .with_inner_size(LogicalSize::new(
                 INITIAL_WINDOW_SIZE_LOGICAL.0,
                 INITIAL_WINDOW_SIZE_LOGICAL.1,
@@ -357,6 +355,8 @@ impl ApplicationHandler<UserEvent> for App {
         };
 
         eprintln!("[evelyn] grid={cols}x{rows}");
+        window.set_transparent(renderer.wants_transparent_window());
+        titlebar::install_opaque_titlebar(&window);
         window.set_ime_allowed(true);
         window.focus_window();
         window.request_redraw();
@@ -581,7 +581,9 @@ fn decode_window_icon() -> Option<Icon> {
     let rgba: Vec<u8> = match info.color_type {
         png::ColorType::Rgba => used.to_vec(),
         png::ColorType::Rgb => used
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|c| [c[0], c[1], c[2], 255])
             .collect(),
         _ => return None,

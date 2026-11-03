@@ -176,6 +176,13 @@ impl Renderer {
         }
     }
 
+    /// Whether the window needs to be non-opaque for `window.opacity` to
+    /// show through. Opacity only applies when no post-process shader is
+    /// active (the post pass writes alpha = 1.0 everywhere).
+    pub fn wants_transparent_window(&self) -> bool {
+        self.post.is_none() && live_config().window.opacity < 1.0
+    }
+
     /// Re-derive everything that comes from the config: font metrics, cell
     /// width, padding, post-processor. Called after `config::reload`.
     /// Returns `true` if the cell grid changed, so the caller can re-sync
@@ -470,9 +477,7 @@ impl Renderer {
             self.bg_cache.valid.resize(rows, false);
         }
         if full_invalidate {
-            for v in &mut self.bg_cache.valid {
-                *v = false;
-            }
+            self.bg_cache.valid.fill(false);
             self.bg_cache.key = Some(key);
         } else {
             // Anywhere the preedit mask sat on either the previous or
