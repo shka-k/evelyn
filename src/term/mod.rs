@@ -357,9 +357,7 @@ impl Term {
     /// scrolling (view_offset change), and any other operation whose
     /// effect on the rendered grid spans the full screen.
     pub(super) fn mark_all_rows(&mut self) {
-        for slot in &mut self.dirty_rows {
-            *slot = true;
-        }
+        self.dirty_rows.fill(true);
         self.dirty = true;
     }
 
@@ -368,9 +366,7 @@ impl Term {
     /// flag and the per-row bits.
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
-        for slot in &mut self.dirty_rows {
-            *slot = false;
-        }
+        self.dirty_rows.fill(false);
     }
 
     /// A blank cell carrying the current SGR attributes — what `\\e[K` and

@@ -31,6 +31,9 @@ impl App {
         eprintln!("[evelyn] config reloaded");
         if let Some(r) = self.renderer.as_mut() {
             let cell_changed = r.reload_from_config();
+            if let Some(w) = &self.window {
+                w.set_transparent(r.wants_transparent_window());
+            }
             if cell_changed {
                 self.sync_grid();
             }
